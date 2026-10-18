@@ -16,6 +16,8 @@ pub mod pdf;
 /// PDF import (vector CAD exports, SHX label comments).
 pub mod pdf_read;
 pub mod plotter;
+/// Spreadsheets (Excel/CSV) for the fire alarm point list.
+pub mod sheets;
 pub mod svg;
 mod svg_read;
 

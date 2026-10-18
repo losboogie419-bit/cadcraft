@@ -15,6 +15,8 @@ mod edit;
 mod exchange;
 /// Fire alarm panel builds (FAPANEL).
 pub mod fa;
+/// Fire alarm point list extractor (FAINVENTORY, FAJOB, FAREPORT, FAPOINTS, …).
+pub mod fapoints;
 /// Fire alarm labels from a point list, revision stamps (FALABELS, FAREV).
 pub mod fatools;
 /// Fire alarm wiring (FATRACE, WIRECHECK).
@@ -211,6 +213,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(fa::specs());
         v.extend(fatrace::specs());
         v.extend(fatools::specs());
+        v.extend(fapoints::specs());
         v
     })
 }

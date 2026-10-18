@@ -28,13 +28,14 @@ This fork of CADCraft is a fire alarm drafting tool. **Read this before planning
 | Import PDF | `PDFIMPORT`, File → Import PDF…, File → Open | vectors, circles/arcs, real text; SHX labels rebuilt as text when clean, kept as strokes (layer PDF_SHX_GLYPHS) with a hidden searchable copy otherwise |
 | XP6-C addresses, T11–T15 jumpers, Class A, HPFF12 DIP 5 | `FAPANEL`, Tools → Fire Alarm → Read Panel Build | tag blocks FA_XP6C / FA_HPFF12 on layer FA_READ; the owner's edits win on rerun |
 | Trace a wire | `FATRACE` (select a wire first) | screws end a trace; crossings don't join |
-| Loose wire ends | `WIRECHECK` | rings on FA_CHECK; still flags drawing details (about 120 on a panel sheet), needs tuning from test reports |
+| Loose wire ends | `WIRECHECK` | rings on FA_CHECK only where a wire stops near a terminal and misses it (about 8–10 on a panel sheet, 3 on a floor plan); arrowheads, labels and border lines are normal ends; `all: true` checks every end |
+| Point list (#6, first build) | Tools → Fire Alarm → Point List: Drawing Inventory, Job Setup, Load Panel Report / Run Sheet, Find Devices and Rooms, Assign Room to Selected, Accept Selected, Accept All Greens on This Page, Show Only What Needs Me, Export | job JSON per job; devices from mapped blocks (DWG/DXF) or address text (PDF, split pieces merged); room by outline, else nearest room number (close call = amber); markers on FA-POINTLIST only; Excel export gap-filled 1–159 per node+loop with Node/Loop/Type/Number, duplicates on the full address; Workbench JSON |
 | Labels from a point list | `FALABELS` (pick a CSV with `from,to` columns) | never adds labels; NOT_FOUND and over-40 are flagged |
 | Revision stamp + colour diff | `FAREV` (pick the previous revision's DXF) | stamp max 40 chars; added green, changed amber, areas ringed on FA_REV |
 | Searchable PDF export | `EXPORTPDF` / PLOT | invisible text layer for stroke-font text |
 
 ## Next / open
-- Tune WIRECHECK using real-vs-noise examples from test reports.
+- Point list next steps: room by wall region (not just nearest number), callout boxes with leaders, riser count check, side list panel, revised-drawing re-match.
 - Device library with tagged terminals (needs real cut sheets; every entry starts `verified:false`).
 - Rule checks that need terminal roles (relay common on SLC, jumper onto a card).
 - Gap-filled VeriFire export of card/circuit addresses.

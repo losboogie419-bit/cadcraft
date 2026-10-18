@@ -645,6 +645,8 @@ pub struct Session {
     picked_viewport: Option<snap::ViewportPoint>,
     /// The last drawing comparison (COMPARE), drawn over the drawing it was made for.
     pub compare: Option<cmd::file::compare::Comparison>,
+    /// The fire alarm point list job and its last result (FAJOB, FAPOINTS).
+    pub fa: Option<cmd::fapoints::FaState>,
     /// Object snap tracking: acquired points and the path under the cursor (from the UI's
     /// [`Session::snap_cursor`] calls; direct distance entry follows the path).
     pub tracking: snap::tracking::Tracker,
@@ -705,6 +707,7 @@ impl Session {
             cursor_deferred: None,
             picked_viewport: None,
             compare: None,
+            fa: None,
             tracking: snap::tracking::Tracker::default(),
             viewport_px: (1200.0, 800.0),
             clipboard: Vec::new(),

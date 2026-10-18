@@ -27,8 +27,18 @@ use crate::{Result, Session};
 pub const CHECK_LAYER: &str = "FA_CHECK";
 const AMBER: Rgb = Rgb(0xFF, 0xB0, 0x00);
 /// Layers never traced (hidden PDF copies, tag and check layers).
-const SKIP_LAYERS: &[&str] =
-    &["PDF_SHX_STROKES", "PDF_SHX_GLYPHS", "PDF_FILLS", "PDF_SHX_SEARCH", "PDF_TEXT_HIDDEN", "PDF_WHITE", "FA_READ", CHECK_LAYER];
+const SKIP_LAYERS: &[&str] = &[
+    "PDF_PAGES",
+    "FA-POINTLIST",
+    "PDF_SHX_STROKES",
+    "PDF_SHX_GLYPHS",
+    "PDF_FILLS",
+    "PDF_SHX_SEARCH",
+    "PDF_TEXT_HIDDEN",
+    "PDF_WHITE",
+    "FA_READ",
+    CHECK_LAYER,
+];
 /// Pieces per drawing the tracer looks at.
 const MAX_PIECES: usize = 2_000_000;
 /// Most loose ends listed.

@@ -164,6 +164,11 @@ fn export_window(s: &Session, framing: Framing, before: Option<&[(u64, Option<Vi
 }
 
 fn install_io() {
+    // Spreadsheets for the fire alarm point list (panel reports in, Excel point lists out).
+    cadcraft_engine::cmd::fapoints::set_sheets(cadcraft_engine::cmd::fapoints::SheetHooks {
+        read: cadcraft_io::sheets::read,
+        write: cadcraft_io::sheets::write_json,
+    });
     cadcraft_engine::cmd::file::set_io(cadcraft_engine::cmd::file::IoHooks {
         read: |b, name| cadcraft_io::read(b, name).map_err(|e| e.to_string()),
         write: |d, name| cadcraft_io::write(d, name).map_err(|e| e.to_string()),

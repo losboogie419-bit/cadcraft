@@ -111,6 +111,11 @@ impl eframe::App for App {
 
 /// File format hooks for the engine (it stays I/O-agnostic).
 pub fn install_io() {
+    // Spreadsheets for the fire alarm point list (panel reports in, Excel point lists out).
+    cadcraft_engine::cmd::fapoints::set_sheets(cadcraft_engine::cmd::fapoints::SheetHooks {
+        read: cadcraft_io::sheets::read,
+        write: cadcraft_io::sheets::write_json,
+    });
     cadcraft_engine::cmd::file::set_io(cadcraft_engine::cmd::file::IoHooks {
         read: |b, name| cadcraft_io::read(b, name).map_err(|e| e.to_string()),
         write: |d, name| cadcraft_io::write(d, name).map_err(|e| e.to_string()),
@@ -133,6 +138,13 @@ fn services() -> Services {
                 .add_filter(i18n::t("Drawings (DWG, DXF, PDF)"), &["dwg", "dxf", "dwt", "pdf"])
                 .add_filter(i18n::t("PDF drawings"), &["pdf"])
                 .add_filter(i18n::t("SVG drawings (SVG, SVGZ)"), &["svg", "svgz"])
+                .add_filter(i18n::t("All files"), &["*"])
+                .pick_file()
+                .map(|p| p.to_string_lossy().to_string())
+        })),
+        pick_file: Some(Box::new(|label: &str, exts: &[&str]| {
+            rfd::FileDialog::new()
+                .add_filter(i18n::t(label), exts)
                 .add_filter(i18n::t("All files"), &["*"])
                 .pick_file()
                 .map(|p| p.to_string_lossy().to_string())

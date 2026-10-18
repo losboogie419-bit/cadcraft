@@ -74,6 +74,8 @@ mod native {
     pub const L_TEXT_HIDDEN: &str = "PDF_TEXT_HIDDEN";
     pub const L_SHX_TEXT: &str = "PDF_SHX_TEXT";
     pub const L_SHX_STROKES: &str = "PDF_SHX_STROKES";
+    /// One closed rectangle per page (off), in page order: tools find a point's page with it.
+    pub const L_PAGES: &str = "PDF_PAGES";
     pub const L_SHX_GLYPHS: &str = "PDF_SHX_GLYPHS";
     pub const L_SHX_SEARCH: &str = "PDF_SHX_SEARCH";
     pub const L_WHITE: &str = "PDF_WHITE";
@@ -135,7 +137,13 @@ mod native {
         /// A filled polygon with more than four corners (diamonds with a closing point, stars,
         /// arrowheads): a solid hatch, so it stays filled.
         Fill(Vec<Vec2>),
-        Text { at: Vec2, end: Vec2, height: f64, rot: f64, value: String },
+        Text {
+            at: Vec2,
+            end: Vec2,
+            height: f64,
+            rot: f64,
+            value: String,
+        },
     }
 
     #[derive(Clone, Debug)]
@@ -1168,6 +1176,7 @@ mod native {
         let mut labels = Vec::new();
         let mut x_off = 0.0;
         let mut n_pages = 0;
+        let mut frames: Vec<[f64; 4]> = Vec::new();
         for (_, &pid) in pages.iter().take(MAX_PAGES) {
             let Ok(pdict) = doc.get_dictionary(pid) else { continue };
             let b = page_box(&doc, pdict);
@@ -1196,16 +1205,21 @@ mod native {
                 let (p, q) = (pm.ap(r[0], r[1]), pm.ap(r[2], r[3]));
                 labels.push(Label { text, r: [p.x.min(q.x), p.y.min(q.y), p.x.max(q.x), p.y.max(q.y)] });
             }
+            let height = match rot {
+                90 | 270 => (b[2] - b[0]) / PT,
+                _ => (b[3] - b[1]) / PT,
+            };
+            frames.push([x_off, 0.0, x_off + width, height]);
             x_off += width + PAGE_GAP;
             n_pages += 1;
         }
         let images = w.images;
         let mut items = w.items;
         let (conv, kept) = apply_labels(&mut items, &labels)?;
-        build(items, n_pages, conv, kept, images)
+        build(items, &frames, n_pages, conv, kept, images)
     }
 
-    fn build(items: Vec<Item>, pages: usize, conv: usize, kept: usize, images: usize) -> Result<Drawing> {
+    fn build(items: Vec<Item>, frames: &[[f64; 4]], pages: usize, conv: usize, kept: usize, images: usize) -> Result<Drawing> {
         let mut d = Drawing::new_imperial();
         for (name, on, desc) in [
             (L_LINES, true, "Lines from the PDF"),
@@ -1217,8 +1231,20 @@ mod native {
             (L_SHX_STROKES, false, "The line strokes the SHX labels were drawn with"),
             (L_SHX_SEARCH, false, "Searchable copies of long SHX notes"),
             (L_WHITE, false, "White (paper-coloured) linework"),
+            (L_PAGES, false, "Page outlines, in page order"),
         ] {
             d.layers.push(Layer { name: name.into(), color: Color::Index(7), on, description: desc.into(), ..Layer::default() });
+        }
+        for f in frames {
+            let v = [Vec2::new(f[0], f[1]), Vec2::new(f[2], f[1]), Vec2::new(f[2], f[3]), Vec2::new(f[0], f[3])];
+            let kind = EntityKind::LwPolyline(LwPolyline {
+                vertices: v.into_iter().map(PolyVertex::new).collect(),
+                closed: true,
+                const_width: 0.0,
+                elevation: 0.0,
+                plinegen: false,
+            });
+            d.add(&Space::Model, Common { layer: L_PAGES.into(), ..Common::default() }, kind).map_err(|e| bad(e.to_string()))?;
         }
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for it in items {

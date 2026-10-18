@@ -188,6 +188,8 @@ impl Default for UiState {
 pub struct Services {
     pub pick_open: Option<Box<dyn Fn() -> Option<String>>>,
     pub pick_save: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    /// Pick any file to open: (filter label, extensions). For job files, reports and lists.
+    pub pick_file: Option<Box<dyn Fn(&str, &[&str]) -> Option<String>>>,
 }
 
 pub struct CadApp {

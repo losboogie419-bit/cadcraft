@@ -28,3 +28,6 @@ tiny-skia = { workspace = true }
 # PDF import (pdf_read.rs). MIT. Native only, like the DWG bridge: the web build reads no PDFs.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lopdf = { version = "0.45", default-features = false }
+# Spreadsheets for the fire alarm point list (sheets.rs): read .xls/.xlsx (MIT), write .xlsx (MIT OR Apache-2.0).
+calamine = "0.36"
+rust_xlsxwriter = "0.100"

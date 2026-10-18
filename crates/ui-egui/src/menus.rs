@@ -147,7 +147,12 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         }
         // Point list labels: pick the CSV.
         "falabels" | "pointlabels" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
-            let picked = app.services.pick_open.as_ref().and_then(|f| f());
+            let picked = app
+                .services
+                .pick_file
+                .as_ref()
+                .and_then(|f| f("Point list (CSV)", &["csv", "txt"]))
+                .or_else(|| app.services.pick_open.as_ref().and_then(|f| f()));
             match picked {
                 Some(p) => app.run("falabels", json!({ "path": p })),
                 None => Ok(Value::Null),
@@ -163,6 +168,28 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
                 q.insert("path".into(), json!(p));
             }
             app.run("farev", Value::Object(q))
+        }
+        // Point list: pick the job file (a new name starts a new job there).
+        "fajob" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
+            let picked = app.services.pick_file.as_ref().and_then(|f| f("Point list job (JSON)", &["json"]));
+            match picked {
+                Some(p) => app.run("fajob", json!({ "path": p })),
+                None => app.run("fajob", json!({ "fromMenu": true })),
+            }
+        }
+        "fareport" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
+            let picked = app.services.pick_file.as_ref().and_then(|f| f("Panel report or run sheet (Excel, CSV)", &["xls", "xlsx", "xlsm", "csv"]));
+            match picked {
+                Some(p) => app.run("fareport", json!({ "path": p })),
+                None => Ok(Value::Null),
+            }
+        }
+        "fapointsexport" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
+            let picked = app.services.pick_save.as_ref().and_then(|f| f("Point_List.xlsx"));
+            match picked {
+                Some(p) => app.run("fapointsexport", json!({ "path": p })),
+                None => Ok(Value::Null),
+            }
         }
         "pdfimport" | "importpdf" if no_path => {
             let picked = app.services.pick_open.as_ref().and_then(|f| f());
@@ -717,6 +744,7 @@ mod tests {
         let asked = Rc::new(RefCell::new(Vec::new()));
         let log = Rc::clone(&asked);
         let services = Services {
+            pick_file: None,
             pick_open: None,
             pick_save: Some(Box::new(move |name: &str| {
                 log.borrow_mut().push(name.to_string());
