@@ -1,0 +1,70 @@
+# FA fork: build the Windows x64 installer (MSI) and portable zip on every push to main, and
+# publish them as the "Latest Windows build" release so they can be downloaded from the
+# Releases page. Unsigned (no code-signing certificate), so Windows SmartScreen warns once.
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fa-windows
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fonts (craft-fonts, optional build input)
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: 3d9ab3a132ed0eff457e424226a435a901da30d3
+          path: craft-fonts
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: WiX v5
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $env:CRAFT_FONTS_DIR = Join-Path $env:GITHUB_WORKSPACE 'craft-fonts'
+          pwsh packaging/windows/package.ps1 -Arch x64
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadcraft-fa-windows-x64
+          path: dist/release/*
+
+      - name: Publish "Latest Windows build" release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')
+          $notes = "Built $date UTC from commit $sha. Download the .msi and run it. Windows SmartScreen may warn because this build isn't code-signed: click More info, then Run anyway."
+          gh release delete latest-windows --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          $files = (Get-ChildItem dist/release/*).FullName
+          gh release create latest-windows @files --title "Latest Windows build ($sha)" --notes $notes --target ${{ github.sha }} --latest
