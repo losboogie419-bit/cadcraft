@@ -211,23 +211,11 @@ fn run_falabels(s: &mut Session, p: &Value) -> Result<Value> {
 
 // ---------- FAREV ----------
 
-/// Today's date (UTC) as YYYY-MM-DD.
+/// Today's date in the computer's local time zone, as YYYY-MM-DD (empty on the web).
 fn today() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let days = i64::try_from(secs / 86_400).unwrap_or(0);
-        // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z.rem_euclid(146_097);
-        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-        let y = yoe + era * 400 + i64::from(m <= 2);
-        format!("{y:04}-{m:02}-{d:02}")
+        jiff::Zoned::now().date().strftime("%Y-%m-%d").to_string()
     }
     #[cfg(target_arch = "wasm32")]
     {

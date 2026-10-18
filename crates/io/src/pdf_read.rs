@@ -132,6 +132,9 @@ mod native {
         Circle(Vec2, f64),
         Arc(Vec2, f64, f64, f64),
         Solid([Vec2; 4]),
+        /// A filled polygon with more than four corners (diamonds with a closing point, stars,
+        /// arrowheads): a solid hatch, so it stays filled.
+        Fill(Vec<Vec2>),
         Text { at: Vec2, end: Vec2, height: f64, rot: f64, value: String },
     }
 
@@ -163,6 +166,7 @@ mod native {
                 add(Vec2::new(c.x + r, c.y + r));
             }
             Shape::Solid(v) => v.iter().for_each(|p| add(*p)),
+            Shape::Fill(v) => v.iter().for_each(|p| add(*p)),
             Shape::Text { at, end, .. } => {
                 add(*at);
                 add(*end);
@@ -866,6 +870,21 @@ mod native {
                     let p = |i: usize| pts.get(i).copied().unwrap_or(pts[0]);
                     // SOLID corner order is 1, 2, 4, 3.
                     if pts.len() == 3 { Shape::Solid([p(0), p(1), p(2), p(2)]) } else { Shape::Solid([p(0), p(1), p(3), p(2)]) }
+                } else if !stroke && pts.len() >= 3 && pts.len() <= 4000 {
+                    let mut v = pts;
+                    while v.len() > 3 && v.first().zip(v.last()).is_some_and(|(a, b)| dist(*a, *b) < 1e-9) {
+                        v.pop();
+                    }
+                    v.dedup_by(|a, b| dist(*a, *b) < 1e-9);
+                    if v.len() == 4 {
+                        Shape::Solid([v[0], v[1], v[3], v[2]])
+                    } else if v.len() == 3 {
+                        Shape::Solid([v[0], v[1], v[2], v[2]])
+                    } else if v.len() > 4 {
+                        Shape::Fill(v)
+                    } else {
+                        Shape::Poly(v, true)
+                    }
                 } else if pts.len() == 2 && !disp.closed {
                     Shape::Line(pts[0], pts[1])
                 } else {
@@ -1215,6 +1234,20 @@ mod native {
                 Shape::Circle(c, r) => EntityKind::Circle(Circle { center: v3(c), radius: r }),
                 Shape::Arc(c, r, s, e) => EntityKind::Arc(Arc { center: v3(c), radius: r, start: s, end: e }),
                 Shape::Solid(v) => EntityKind::Solid(Solid { corners: v.map(v3) }),
+                Shape::Fill(v) => EntityKind::Hatch(cadcraft_doc::Hatch {
+                    pattern: "SOLID".into(),
+                    solid: true,
+                    loops: vec![cadcraft_doc::HatchLoop { vertices: v.into_iter().map(PolyVertex::new).collect(), outer: true, sources: Vec::new() }],
+                    scale: 1.0,
+                    angle: 0.0,
+                    associative: false,
+                    style: 0,
+                    elevation: 0.0,
+                    gradient: None,
+                    origin: Vec2::ZERO,
+                    background: None,
+                    pattern_lines: Vec::new(),
+                }),
                 Shape::Text { at, end, height, rot, value } => {
                     let fit = dist(at, end) > height * 0.3;
                     EntityKind::Text(Text {

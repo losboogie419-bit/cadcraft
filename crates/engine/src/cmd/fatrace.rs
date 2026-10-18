@@ -44,7 +44,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("wirecheck", "Wire Check", run_wirecheck)
             .menu(&["Tools", "Fire Alarm", "Wire Check (loose wire ends)"])
             .alias(&["wchk"])
-            .params("{tol?: drawing units (default 0.008), window?: [[x0,y0],[x1,y1]], mark?: true (rings on layer FA_CHECK), minLength?: shortest piece counted as a wire (default 50 × tol)} → {loose: [{at, handle, label?}], count}")
+            .params("{tol?: drawing units (default 0.008), window?: [[x0,y0],[x1,y1]], mark?: true (rings on layer FA_CHECK), minLength?: shortest piece counted as a wire (default 50 × tol), all?: false (true: every open end, not only ends near a terminal), reach?: how near a terminal an end must be (default 40 × tol), layers?: wire layers to check (default: layers named WIRE/SLC/NAC/CIRCUIT/CABLE, else all)} → {loose: [{at, handle, label?}], count}")
             .enabled(has_doc),
     ]
 }
@@ -205,6 +205,38 @@ impl Net {
     fn screw_at(&self, p: Vec2, tol: f64) -> Option<(Vec2, f64)> {
         self.screws.iter().copied().filter(|(c, r)| *r < tol * 40.0 && (p.x - c.x).hypot(p.y - c.y) <= r + tol).min_by(|a, b| a.1.total_cmp(&b.1))
     }
+    /// An arrowhead at end `e` of piece `pi`: a filled shape there, or two or more short strokes
+    /// (an outlined head) meeting it.
+    fn arrow_at(&self, pi: usize, e: Vec2, tol: f64) -> bool {
+        if self.fills.iter().any(|f| f.contains_or_near(e, tol * 2.0)) {
+            return true;
+        }
+        let short = tol * 25.0;
+        let mut seen: Vec<usize> = Vec::new();
+        for (pj, sj) in self.near(e) {
+            if pj == pi || seen.contains(&pj) {
+                continue;
+            }
+            let Some(q) = self.pieces.get(pj) else { continue };
+            let len: f64 = q.pts.windows(2).map(|w| if let [a, b] = w { (a.x - b.x).hypot(a.y - b.y) } else { 0.0 }).sum();
+            if len <= short && self.seg(pj, sj).is_some_and(|(a, b)| seg_dist(a, b, e) <= tol * 2.0) {
+                seen.push(pj);
+            }
+        }
+        seen.len() >= 2 || (seen.len() == 1 && self.pieces.get(seen[0]).is_some_and(|q| q.pts.len() >= 3))
+    }
+
+    fn is_short(&self, pi: usize, tol: f64) -> bool {
+        self.pieces
+            .get(pi)
+            .is_some_and(|q| q.pts.windows(2).map(|w| if let [a, b] = w { (a.x - b.x).hypot(a.y - b.y) } else { 0.0 }).sum::<f64>() <= tol * 25.0)
+    }
+
+    /// Distance from `p` to the nearest screw (terminal) edge.
+    fn screw_gap(&self, p: Vec2) -> f64 {
+        self.screws.iter().map(|(c, r)| ((p.x - c.x).hypot(p.y - c.y) - r).max(0.0)).fold(f64::INFINITY, f64::min)
+    }
+
     fn label_near(&self, p: Vec2, reach: f64) -> Option<String> {
         self.texts
             .iter()
@@ -294,7 +326,9 @@ fn run_fatrace(s: &mut Session, p: &Value) -> Result<Value> {
         for (pj, at) in net.touching(pi, tol) {
             // Two pieces meeting on a screw are each landed there: that's a terminal, not a joint.
             let border = net.pieces.get(pj).is_some_and(|q| q.border);
-            if !border && net.screw_at(at, tol).is_none() && !seen.get(pj).copied().unwrap_or(true) {
+            // Arrowhead strokes at a wire's end are the end, not more wire.
+            let head = net.is_short(pj, tol) && net.arrow_at(pi, at, tol);
+            if !border && !head && net.screw_at(at, tol).is_none() && !seen.get(pj).copied().unwrap_or(true) {
                 stack.push(pj);
             }
         }
@@ -320,6 +354,11 @@ fn run_fatrace(s: &mut Session, p: &Value) -> Result<Value> {
                 Some((c, _)) => json!({ "at": [e.x, e.y], "lands": "screw", "screw": [c.x, c.y], "label": net.label_near(c, tol * 60.0) }),
                 None => match net.label_near(e, tol * 30.0) {
                     Some(l) => json!({ "at": [e.x, e.y], "lands": "label", "label": l }),
+                    // An arrowhead pointing at a circuit label: a normal end.
+                    None if net.arrow_at(pi, e, tol) => match net.label_near(e, tol * 150.0) {
+                        Some(l) => json!({ "at": [e.x, e.y], "lands": "label", "arrow": true, "label": l }),
+                        None => json!({ "at": [e.x, e.y], "lands": "arrow" }),
+                    },
                     None => json!({ "at": [e.x, e.y], "lands": "loose" }),
                 },
             };
@@ -347,9 +386,36 @@ fn run_wirecheck(s: &mut Session, p: &Value) -> Result<Value> {
         Some([a0.x.min(a1.x), a0.y.min(a1.y), a0.x.max(a1.x), a0.y.max(a1.y)])
     });
     let min_len = p.get("minLength").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(tol * 50.0);
+    // By default only ends that come close to a terminal (screw) but miss it are wiring problems;
+    // an end out in open space is a drawing detail. `all: true` checks every end.
+    let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let reach = p.get("reach").and_then(Value::as_f64).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(tol * 40.0);
     let net = gather(s, tol)?;
+    // Wire layers, when the drawing has them (WIRE, SLC, NAC, CIRCUIT, CABLE in the name), or
+    // the `layers` given: only lines on them are checked.
+    let wire_layers: Vec<String> = match p.get("layers").and_then(Value::as_array) {
+        Some(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_ascii_uppercase())).collect(),
+        None => {
+            let st = s.state()?;
+            st.doc
+                .layers
+                .iter()
+                .map(|l| l.name.to_ascii_uppercase())
+                .filter(|n| ["WIRE", "SLC", "NAC", "CIRCUIT", "CABLE"].iter().any(|k| n.contains(k)))
+                .collect()
+        }
+    };
+    let layer_of: HashMap<Handle, String> = if wire_layers.is_empty() {
+        HashMap::new()
+    } else {
+        let st = s.state()?;
+        st.doc.space(&Space::Model).map(|m| m.iter().map(|e| (e.handle, e.common.layer.to_ascii_uppercase())).collect()).unwrap_or_default()
+    };
     let mut loose = Vec::new();
     'pieces: for (pi, piece) in net.pieces.iter().enumerate() {
+        if !wire_layers.is_empty() && !layer_of.get(&piece.handle).is_some_and(|l| wire_layers.contains(l)) {
+            continue;
+        }
         // Short artwork (glyph strokes, board details, hatching) isn't a wire.
         let len: f64 = piece.pts.windows(2).map(|w| if let [a, b] = w { (a.x - b.x).hypot(a.y - b.y) } else { 0.0 }).sum();
         if len < min_len || piece.border {
@@ -362,7 +428,10 @@ fn run_wirecheck(s: &mut Session, p: &Value) -> Result<Value> {
             let touches = net.near(e).into_iter().any(|(pj, sj)| pj != pi && net.seg(pj, sj).is_some_and(|(a, b)| seg_dist(a, b, e) <= tol))
                 || net.screws.iter().any(|(c, r)| (e.x - c.x).hypot(e.y - c.y) <= r + tol);
             // An end at a label is a leader, an underline or a labelled feed ("TO DAAD #8"): not loose.
-            if touches || net.label_near(e, tol * 25.0).is_some() || net.fills.iter().any(|f| f.contains_or_near(e, tol)) {
+            if touches || net.label_near(e, tol * 25.0).is_some() || net.arrow_at(pi, e, tol) {
+                continue;
+            }
+            if !all && net.screw_gap(e) > reach {
                 continue;
             }
             loose.push((e, piece.handle, net.label_near(e, tol * 60.0)));
@@ -436,7 +505,39 @@ mod tests {
         line(&mut s, (20.0, 20.0), (20.5, 20.0));
         // Land the open end at (0,0) on a screw.
         let _ = s.add_entity(EntityKind::Circle(Circle { center: Vec3::new(0.0, 0.0, 0.0), radius: 0.02 }));
-        let r = s.execute("wirecheck", &json!({})).unwrap_or_default();
+        let r = s.execute("wirecheck", &json!({ "all": true })).unwrap_or_default();
         assert_eq!(r["count"], 3, "(1,1) and both ends of the far stub are loose: {r}");
+        // By default only an end that comes near a terminal and misses it counts.
+        let r = s.execute("wirecheck", &json!({})).unwrap_or_default();
+        assert_eq!(r["count"], 0, "no end is near a terminal: {r}");
+        let _ = s.add_entity(EntityKind::Circle(Circle { center: Vec3::new(1.0, 1.1, 0.0), radius: 0.02 }));
+        let r = s.execute("wirecheck", &json!({})).unwrap_or_default();
+        assert_eq!(r["count"], 1, "(1,1) stops short of the screw at (1,1.1): {r}");
+    }
+
+    #[test]
+    fn arrowhead_end_lands_on_label() {
+        let mut s = Session::new();
+        let _ = s.execute("new", &json!({}));
+        let _ = s.add_entity(EntityKind::Circle(Circle { center: Vec3::new(0.0, 0.0, 0.0), radius: 0.02 }));
+        line(&mut s, (0.0, 0.0), (2.0, 0.0));
+        // Outlined arrowhead at (2,0) and the circuit label beyond it.
+        line(&mut s, (2.0, 0.0), (1.9, 0.04));
+        line(&mut s, (2.0, 0.0), (1.9, -0.04));
+        let _ = s.add_entity(EntityKind::Text(cadcraft_doc::Text {
+            insert: Vec3::new(2.3, 0.0, 0.0),
+            align_pt: None,
+            height: 0.1,
+            value: "SAMPLE-1".into(),
+            rotation: 0.0,
+            width_factor: 1.0,
+            oblique: 0.0,
+            style: "Standard".into(),
+            halign: cadcraft_doc::HAlign::Left,
+            valign: cadcraft_doc::VAlign::Baseline,
+        }));
+        let r = s.execute("fatrace", &json!({ "point": [1.0, 0.0] })).unwrap_or_default();
+        let lands: Vec<&str> = r["ends"].as_array().map(|v| v.iter().filter_map(|e| e["lands"].as_str()).collect()).unwrap_or_default();
+        assert!(lands.contains(&"screw") && lands.contains(&"label") && !lands.contains(&"loose"), "{r}");
     }
 }
