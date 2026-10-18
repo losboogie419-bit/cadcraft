@@ -145,6 +145,25 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             }
             Ok(json!({"interfaceLanguage": preference.code(), "shown": shown}))
         }
+        // Point list labels: pick the CSV.
+        "falabels" | "pointlabels" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
+            let picked = app.services.pick_open.as_ref().and_then(|f| f());
+            match picked {
+                Some(p) => app.run("falabels", json!({ "path": p })),
+                None => Ok(Value::Null),
+            }
+        }
+        // Revision stamp: pick the previous revision to compare with (cancel: stamp only).
+        "farev" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
+            let picked = app.services.pick_open.as_ref().and_then(|f| f());
+            let mut q = serde_json::Map::new();
+            // Never empty, so this route isn't taken again.
+            q.insert("fromMenu".into(), json!(true));
+            if let Some(p) = picked {
+                q.insert("path".into(), json!(p));
+            }
+            app.run("farev", Value::Object(q))
+        }
         "pdfimport" | "importpdf" if no_path => {
             let picked = app.services.pick_open.as_ref().and_then(|f| f());
             if let Some(p) = picked {

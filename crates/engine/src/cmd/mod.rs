@@ -13,6 +13,12 @@ mod draw2;
 mod draworder;
 mod edit;
 mod exchange;
+/// Fire alarm panel builds (FAPANEL).
+pub mod fa;
+/// Fire alarm labels from a point list, revision stamps (FALABELS, FAREV).
+pub mod fatools;
+/// Fire alarm wiring (FATRACE, WIRECHECK).
+pub mod fatrace;
 pub mod file;
 mod gripcmds;
 mod griphot;
@@ -202,6 +208,9 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(tolerance::specs());
         v.extend(constraints::specs());
         v.extend(lisp::specs());
+        v.extend(fa::specs());
+        v.extend(fatrace::specs());
+        v.extend(fatools::specs());
         v
     })
 }

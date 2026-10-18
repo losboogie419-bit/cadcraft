@@ -389,6 +389,9 @@ struct SheetPage {
     links: Vec<(Bounds2, String)>,
     /// Page label: the layout name.
     label: String,
+    /// Invisible text (render mode 3) for text drawn with the stroke font, so the PDF can be
+    /// searched: (baseline start in points, angle, size in points, width in points, text).
+    search: Vec<(Vec2, f64, f64, f64, String)>,
 }
 
 /// Plot one space.
@@ -449,7 +452,8 @@ fn sheet(d: &Drawing, space: &Space, o: &PdfOptions, links_to: &[(Handle, String
         }
     }
     let links = links(&list, &map, &clip_pt, links_to);
-    Ok(SheetPage { media, list, map, clip_pt, layers, links, label: sheet_name(space) })
+    let search = search_texts(d, space, &map, &clip_pt);
+    Ok(SheetPage { media, list, map, clip_pt, layers, links, label: sheet_name(space), search })
 }
 
 /// Source and destination origins for the shared model-space PDF/PNG placement behavior.
@@ -478,6 +482,135 @@ pub(crate) fn placement(space: &Space, bounds: &Bounds2, fit: bool, sheet: &Shee
 
 /// The hyperlinks to plot: the options' own, then (with [`PdfOptions::hyperlinks`]) those the
 /// drawing file gave its entities as `PE_URL` extended data, at most [`MAX_LINKS`] in all.
+/// Layers whose text is searchable even though they're off (hidden searchable copies).
+const SEARCH_ONLY_LAYERS: &[&str] = &["PDF_SHX_SEARCH", "PDF_TEXT_HIDDEN"];
+
+fn is_truetype(d: &Drawing, style: &str) -> bool {
+    d.text_style(style).is_some_and(|st| {
+        let f = st.font.to_ascii_lowercase();
+        f.ends_with(".ttf") || f.ends_with(".otf") || f.ends_with(".ttc")
+    })
+}
+
+/// MTEXT contents without formatting codes: paragraph breaks become spaces.
+fn mtext_plain(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '{' | '}' => {}
+            '\\' => match it.next() {
+                Some('P') | Some('~') => out.push(' '),
+                Some('\\') => out.push('\\'),
+                Some('{') => out.push('{'),
+                Some('}') => out.push('}'),
+                // Codes with an argument up to `;` (\f, \H, \C, \W, \Q, \T, \A, \p).
+                Some(code) if "fFHCcWQTApS".contains(code) => {
+                    for x in it.by_ref() {
+                        if x == ';' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => out.push(c),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The text a sheet draws with the stroke font, placed in page points for the invisible layer.
+fn search_texts(d: &Drawing, space: &Space, map: &Map, clip_pt: &Bounds2) -> Vec<(Vec2, f64, f64, f64, String)> {
+    let mut out = Vec::new();
+    let Some(store) = d.space(space) else { return out };
+    let s = map.s * map.k;
+    let mut push = |at: Vec2, rot: f64, height: f64, width: Option<f64>, value: &str| {
+        let value = value.trim();
+        if value.is_empty() || !(height.is_finite() && height > 0.0) || out.len() >= 200_000 {
+            return;
+        }
+        let p = map.pt(at);
+        if !clip_pt.contains(p) {
+            return;
+        }
+        // Cap height → font size (Helvetica's caps are about 0.72 em).
+        let size = height * s / 0.72;
+        let n = value.chars().count() as f64;
+        let w = width.filter(|w| w.is_finite() && *w > 0.0).map(|w| w * s).unwrap_or(n * size * 0.6);
+        out.push((p, rot, size, w, value.chars().take(1000).collect()));
+    };
+    for e in store.iter() {
+        let on = d.layer(&e.common.layer).is_none_or(|l| l.on && !l.frozen);
+        let search_only = SEARCH_ONLY_LAYERS.contains(&e.common.layer.as_str());
+        if !(on || search_only) {
+            continue;
+        }
+        match &e.kind {
+            cadcraft_doc::EntityKind::Text(t) if !is_truetype(d, &t.style) => {
+                let width = t
+                    .align_pt
+                    .filter(|_| matches!(t.halign, cadcraft_doc::HAlign::Fit | cadcraft_doc::HAlign::Aligned))
+                    .map(|a| a.xy().dist(t.insert.xy()));
+                push(t.insert.xy(), t.rotation, t.height, width, &t.value);
+            }
+            cadcraft_doc::EntityKind::MText(m) if !is_truetype(d, &m.style) => {
+                push(m.insert.xy(), m.rotation, m.height, None, &mtext_plain(&m.contents))
+            }
+            cadcraft_doc::EntityKind::Insert(ins) if on => {
+                for a in ins.attribs.iter().filter(|a| !a.invisible && !is_truetype(d, &a.text.style)) {
+                    push(a.text.insert.xy(), a.text.rotation, a.text.height, None, &a.text.value);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The invisible text layer: `/FS` is Helvetica, render mode 3 (neither filled nor stroked).
+fn search_stream(c: &mut String, search: &[(Vec2, f64, f64, f64, String)]) {
+    if search.is_empty() {
+        return;
+    }
+    c.push_str("BT\n3 Tr\n");
+    for (p, rot, size, w, text) in search {
+        let (sn, cs) = rot.sin_cos();
+        let _ = write!(c, "/FS 1 Tf ");
+        for v in [cs * size, sn * size, -sn * size, cs * size] {
+            num(c, v);
+            c.push(' ');
+        }
+        pt(c, *p);
+        let natural = text.chars().count() as f64 * size * 0.6;
+        let tz = if natural > 0.0 { (w / natural * 100.0).clamp(10.0, 1000.0) } else { 100.0 };
+        c.push_str(" Tm ");
+        num(c, tz);
+        let latin: String = text.chars().map(|ch| if (ch as u32) < 256 && !ch.is_control() { ch } else { '?' }).collect();
+        let _ = writeln!(c, " Tz {} Tj", pdf_latin1(&latin));
+    }
+    c.push_str("ET\n");
+}
+
+/// A literal PDF string of Latin-1 text (WinAnsi), with `(`, `)` and `\` escaped and other bytes
+/// written as octal.
+fn pdf_latin1(s: &str) -> String {
+    let mut out = String::from("(");
+    for ch in s.chars() {
+        let b = ch as u32;
+        if matches!(ch, '(' | ')' | '\\') {
+            out.push('\\');
+            out.push(ch);
+        } else if (32..127).contains(&b) {
+            out.push(ch);
+        } else {
+            let _ = write!(out, "\\{b:03o}");
+        }
+    }
+    out.push(')');
+    out
+}
+
 fn all_links(d: &Drawing, o: &PdfOptions) -> Vec<(Handle, String)> {
     let mut out: Vec<(Handle, String)> = o.links.iter().take(MAX_LINKS).cloned().collect();
     if !o.hyperlinks {
@@ -896,11 +1029,14 @@ fn assemble(d: &Drawing, pages: &[SheetPage], fonts: &fonts::Fonts, o: &PdfOptio
     let mut ocgs: Vec<(u32, usize)> = Vec::new();
     let mut kids = Vec::new();
     // Page dictionaries are completed once the fonts are written: (page, its fonts, the rest).
-    let mut page_dicts: Vec<(usize, Vec<usize>, String, String, String)> = Vec::new();
+    let mut page_dicts: Vec<(usize, Vec<usize>, String, String, String, Option<usize>)> = Vec::new();
+    // Helvetica for the invisible search text, written once.
+    let mut helvetica: Option<usize> = None;
     for p in pages {
         let page = objs.reserve();
         let texts = fonts.texts(&p.list);
-        let (marks, alphas) = content_stream(&p.list, &p.map, &p.clip_pt, &p.layers, &texts);
+        let (mut marks, alphas) = content_stream(&p.list, &p.map, &p.clip_pt, &p.layers, &texts);
+        search_stream(&mut marks, &p.search);
         let content = objs.add(stream(marks.as_bytes(), o.compress, ""));
         let mut used: Vec<usize> = texts.values().map(|(f, _)| *f).collect();
         used.sort_unstable();
@@ -931,17 +1067,25 @@ fn assemble(d: &Drawing, pages: &[SheetPage], fonts: &fonts::Fonts, o: &PdfOptio
         let mut mb = String::new();
         pt(&mut mb, p.media);
         let annots = if annots.is_empty() { String::new() } else { format!(" /Annots [{}]", refs(annots)) };
-        page_dicts.push((page, used, props, ext_gstates(&alphas), format!("/MediaBox [0 0 {mb}] /Contents {content} 0 R{annots}")));
+        let search_font = if p.search.is_empty() {
+            None
+        } else {
+            Some(*helvetica.get_or_insert_with(|| objs.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")))
+        };
+        page_dicts.push((page, used, props, ext_gstates(&alphas), format!("/MediaBox [0 0 {mb}] /Contents {content} 0 R{annots}"), search_font));
         kids.push(page);
     }
     let font_ids = if fonts.is_empty() { Vec::new() } else { fonts.write(&mut objs, o.compress) };
-    for (page, used, props, gstates, rest) in page_dicts {
+    for (page, used, props, gstates, rest, search_font) in page_dicts {
         let mut res = String::new();
         if !props.is_empty() {
             let _ = write!(res, " /Properties <<{props} >>");
         }
         res.push_str(&gstates);
-        let f: Vec<String> = used.iter().filter_map(|i| Some(format!("/F{i} {} 0 R", font_ids.get(*i)?))).collect();
+        let mut f: Vec<String> = used.iter().filter_map(|i| Some(format!("/F{i} {} 0 R", font_ids.get(*i)?))).collect();
+        if let Some(id) = search_font {
+            f.push(format!("/FS {id} 0 R"));
+        }
         if !f.is_empty() {
             let _ = write!(res, " /Font << {} >>", f.join(" "));
         }

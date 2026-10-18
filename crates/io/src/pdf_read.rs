@@ -74,6 +74,7 @@ mod native {
     pub const L_TEXT_HIDDEN: &str = "PDF_TEXT_HIDDEN";
     pub const L_SHX_TEXT: &str = "PDF_SHX_TEXT";
     pub const L_SHX_STROKES: &str = "PDF_SHX_STROKES";
+    pub const L_SHX_GLYPHS: &str = "PDF_SHX_GLYPHS";
     pub const L_SHX_SEARCH: &str = "PDF_SHX_SEARCH";
     pub const L_WHITE: &str = "PDF_WHITE";
 
@@ -951,6 +952,8 @@ mod native {
             grid.entry((cx, cy)).or_default().push(i);
         }
         let mut taken = vec![false; items.len()];
+        // Glyph strokes of labels that keep their strokes: still drawn, on their own layer.
+        let mut glyph_kept = vec![false; items.len()];
         let (mut conv, mut kept) = (0, 0);
         let mut out: Vec<Item> = Vec::new();
         let overlaps = label_overlaps(labels);
@@ -1038,6 +1041,11 @@ mod native {
                     layer: L_SHX_SEARCH,
                     stroke: false,
                 });
+                for &i in &glyphs {
+                    if let Some(t) = glyph_kept.get_mut(i) {
+                        *t = true;
+                    }
+                }
                 kept += 1;
                 continue;
             }
@@ -1064,6 +1072,8 @@ mod native {
         for (i, it) in items.iter_mut().enumerate() {
             if taken.get(i).copied().unwrap_or(false) {
                 it.layer = L_SHX_STROKES;
+            } else if glyph_kept.get(i).copied().unwrap_or(false) {
+                it.layer = L_SHX_GLYPHS;
             }
         }
         if items.len().saturating_add(out.len()) > MAX_ITEMS {
@@ -1184,6 +1194,7 @@ mod native {
             (L_TEXT, true, "Text from the PDF's text layer"),
             (L_SHX_TEXT, true, "AutoCAD SHX labels rebuilt as real text"),
             (L_TEXT_HIDDEN, false, "Invisible (searchable) text from the PDF"),
+            (L_SHX_GLYPHS, true, "Line-drawn (SHX) labels kept as drawn: wrapped, long or overlapping"),
             (L_SHX_STROKES, false, "The line strokes the SHX labels were drawn with"),
             (L_SHX_SEARCH, false, "Searchable copies of long SHX notes"),
             (L_WHITE, false, "White (paper-coloured) linework"),
