@@ -6,6 +6,9 @@ name: Windows build
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
   workflow_dispatch:
 
 permissions:

@@ -1,0 +1,18 @@
+name: Idea / plan
+description: A feature idea or a plan for how something should work. Claude reads these and builds them.
+title: "[Idea] <short description>"
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: "Check STATUS.md first (what's done, what's next, the owner's rules). **Public repo: no job details.**"
+  - type: textarea
+    id: idea
+    attributes:
+      label: What and why
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: How we'll know it works (a test the owner or a bot can run)

@@ -1,0 +1,28 @@
+name: Bug
+description: Something in the app doesn't work.
+title: "[Bug] <short description>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "**Public repo: no job drawings or job details.**"
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did, what happened, what you expected
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: How bad
+      options:
+        - Minor (batch it; don't rebuild just for this)
+        - Blocks a feature
+        - Crash / data loss
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build (release title / commit)

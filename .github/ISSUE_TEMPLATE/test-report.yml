@@ -1,0 +1,40 @@
+name: Test report
+description: Results of running FA_CAD_Test_Script (one report per build).
+title: "[Test] build <commit> – <tester>"
+labels: ["test-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Public repo: no job drawings, addresses, panel names or other job details.** Describe problems in general terms (e.g. "card #5 on a 9-card sheet").
+  - type: input
+    id: build
+    attributes:
+      label: Build (release title / commit)
+    validations:
+      required: true
+  - type: input
+    id: tester
+    attributes:
+      label: Tester (person or bot name)
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Paste the report block from the test script (PASS/FAIL per test).
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Worst problem found
+      options:
+        - None — all passed
+        - Minor (owner fixes by hand, batch for later)
+        - Blocks a feature
+        - Crash / data loss
+    validations:
+      required: true
