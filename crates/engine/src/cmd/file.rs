@@ -161,6 +161,12 @@ pub fn specs() -> Vec<CommandSpec> {
             .params("{path} | {data: base64, name} → {index, entities?, warnings: what reading left out}")
             .enabled(always)
             .noundo(),
+        CommandSpec::new("pdfimport", "Import PDF...", run_pdfimport)
+            .menu(&["File", "Import PDF..."])
+            .alias(&["importpdf"])
+            .params("{path} | {data: base64, name} → like OPEN: the PDF opens as a new drawing (lines, circles, arcs, text; AutoCAD SHX labels rebuilt as text)")
+            .enabled(always)
+            .noundo(),
         CommandSpec::new("close", "Close", run_close).menu(&["File", "Close"]).key("Cmd+W").params("{index?}").noundo(),
         CommandSpec::new("closeall", "Close All", run_closeall).menu(&["File", "Close All"]).enabled(always).noundo(),
         CommandSpec::new("qsave", "Save", run_qsave_reporting).menu(&["File", "Save"]).key("Cmd+S").alias(&["save"]).params("{path?}").noundo(),
@@ -322,6 +328,26 @@ fn opened(s: &Session, i: usize, entities: bool) -> Value {
     } else {
         json!({ "index": i, "warnings": warnings })
     }
+}
+
+/// PDFIMPORT: OPEN for a PDF (the io layer reads it by its extension).
+fn run_pdfimport(s: &mut Session, p: &Value) -> Result<Value> {
+    if let Some(path) = str_param(p, "path")
+        && !path.to_ascii_lowercase().ends_with(".pdf")
+    {
+        return Err(bad("pdfimport", "pick a .pdf file"));
+    }
+    if str_param(p, "path").is_none()
+        && str_param(p, "data").is_some()
+        && !str_param(p, "name").is_some_and(|n| n.to_ascii_lowercase().ends_with(".pdf"))
+    {
+        let mut q = p.clone();
+        if let Some(o) = q.as_object_mut() {
+            o.insert("name".into(), Value::String("import.pdf".into()));
+        }
+        return run_open(s, &q);
+    }
+    run_open(s, p)
 }
 
 fn run_open(s: &mut Session, p: &Value) -> Result<Value> {

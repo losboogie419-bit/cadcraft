@@ -24,3 +24,7 @@ quick-xml = { workspace = true }
 
 [dev-dependencies]
 tiny-skia = { workspace = true }
+
+# PDF import (pdf_read.rs). MIT. Native only, like the DWG bridge: the web build reads no PDFs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+lopdf = { version = "0.45", default-features = false }

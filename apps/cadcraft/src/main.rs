@@ -130,7 +130,8 @@ fn services() -> Services {
     Services {
         pick_open: Some(Box::new(|| {
             rfd::FileDialog::new()
-                .add_filter(i18n::t("Drawings (DWG, DXF)"), &["dwg", "dxf", "dwt"])
+                .add_filter(i18n::t("Drawings (DWG, DXF, PDF)"), &["dwg", "dxf", "dwt", "pdf"])
+                .add_filter(i18n::t("PDF drawings"), &["pdf"])
                 .add_filter(i18n::t("SVG drawings (SVG, SVGZ)"), &["svg", "svgz"])
                 .add_filter(i18n::t("All files"), &["*"])
                 .pick_file()

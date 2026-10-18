@@ -145,6 +145,17 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             }
             Ok(json!({"interfaceLanguage": preference.code(), "shown": shown}))
         }
+        "pdfimport" | "importpdf" if no_path => {
+            let picked = app.services.pick_open.as_ref().and_then(|f| f());
+            if let Some(p) = picked {
+                if p.to_ascii_lowercase().ends_with(".pdf") {
+                    app.open_path(&p);
+                } else {
+                    app.set_status("Import PDF: pick a .pdf file");
+                }
+            }
+            Ok(Value::Null)
+        }
         "ui.open" | "open" if no_path => {
             let picked = app.services.pick_open.as_ref().and_then(|f| f());
             if let Some(p) = picked {
