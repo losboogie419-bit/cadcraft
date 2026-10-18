@@ -34,11 +34,16 @@ This fork of CADCraft is a fire alarm drafting tool. **Read this before planning
 | Revision stamp + colour diff | `FAREV` (pick the previous revision's DXF) | stamp max 40 chars; added green, changed amber, areas ringed on FA_REV |
 | Searchable PDF export | `EXPORTPDF` / PLOT | invisible text layer for stroke-font text |
 
-## Next / open
-- Point list next steps: room by wall region (not just nearest number), callout boxes with leaders, riser count check, side list panel, revised-drawing re-match.
-- Device library with tagged terminals (needs real cut sheets; every entry starts `verified:false`).
-- Rule checks that need terminal roles (relay common on SLC, jumper onto a card).
-- Gap-filled VeriFire export of card/circuit addresses.
+## Next / open (owner's order)
+1. **Bug build from #13:** keep addresses exactly as drawn (zero padding); room name never a panel/power tag; Device Type = SMOKE (D) / MODULE (M); page = title-block sheet number; filled diamonds (#3); FAREV help text; highlight the device's own address text (colored overlay on FA-POINTLIST, no rings); WIRECHECK only on sheets with terminal blocks (panel builds, cut sheets), never floor plans.
+2. **Run sheet export, owner's format (replaces #13 item 14):** DEVICE ADDRESS (`N1-L1-D-01` style) | DEVICE TYPE (Smoke / Module only) | FUNCTION (waterflow, fire/smoke damper, duct detector, area detector, heat detector, … only when the drawing shows it) | ROOM # (name and number) | INTERFACE EQUIPMENT | COMMENTS (app concerns + owner notes; owner notes are never overwritten). No DGP, loop, NAC zone, device input/output, key switch, install or P2P columns. Full information, no label shortening (labels are made later in the owner's separate abbreviations app). The owner's run sheets are a format reference only: never committed, never used as data or as an answer key.
+3. **In-app review (#13 items 8–13, 24–29):** hover/click on the drawing, re-assign room, show missed, per-sheet counts, review tab.
+4. **Record keeping (#13 items 15–18).**
+5. **Field change markups** (moved / swapped / dual address / removed, into Comments and an as-built list) and **search the whole drawing set** (index every address, room and equipment tag across sheets).
+- **On hold:** point-to-point testing mode (tablet limits; maybe its own app).
+- **Later:** riser from the point list; revision compare; learn from fixes.
+- **Held until they can be made job-generic:** program compare (#8), zone/CBE overlay, damper/fan pairing check, address check per loop, NAC circuit check.
+- Device library with tagged terminals (#10, needs real cut sheets; every entry starts `verified:false`).
 
 ## Testing
 Use `FA_CAD_Test_Script` v2 (kept by the owner, not in the repo). File results with the **Test report** issue form.
