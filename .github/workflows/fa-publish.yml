@@ -1,0 +1,35 @@
+# FA fork: publish the installer from an earlier build run (no rebuild), e.g. when only the
+# release step failed. Run it from the Actions tab with that run's id.
+name: Publish a build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id (from its Actions URL)"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cadcraft-fa-windows-x64
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha=$(gh api repos/$GH_REPO/actions/runs/${{ inputs.run_id }} --jq .head_sha)
+          short=${sha:0:7}
+          gh release create "build-r${{ inputs.run_id }}-$short" dist/* --title "Latest Windows build ($short)" \
+            --notes "Built from commit $short. Download the .msi and run it. Windows SmartScreen may warn because this build isn't code-signed: click More info, then Run anyway." \
+            --target "$sha" --latest

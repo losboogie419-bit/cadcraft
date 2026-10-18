@@ -65,9 +65,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $sha = "${{ github.sha }}".Substring(0, 7)
+          $tag = "build-${{ github.run_number }}-$sha"
           $date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')
           $notes = "Built $date UTC from commit $sha. Download the .msi and run it. Windows SmartScreen may warn because this build isn't code-signed: click More info, then Run anyway."
-          gh release delete latest-windows --yes --cleanup-tag 2>$null
-          $global:LASTEXITCODE = 0
           $files = (Get-ChildItem dist/release/*).FullName
-          gh release create latest-windows @files --title "Latest Windows build ($sha)" --notes $notes --target ${{ github.sha }} --latest
+          gh release create $tag @files --title "Latest Windows build ($sha)" --notes $notes --target ${{ github.sha }} --latest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Keep the newest 3 builds.
+          $old = gh release list --limit 50 --json tagName --jq '.[].tagName' | Where-Object { $_ -like 'build-*' } | Select-Object -Skip 3
+          foreach ($t in $old) { gh release delete $t --yes --cleanup-tag }
+          $global:LASTEXITCODE = 0
