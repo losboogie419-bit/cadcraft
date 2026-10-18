@@ -30,6 +30,11 @@ jobs:
         run: |
           sha=$(gh api repos/$GH_REPO/actions/runs/${{ inputs.run_id }} --jq .head_sha)
           short=${sha:0:7}
-          gh release create "build-r${{ inputs.run_id }}-$short" dist/* --title "Latest Windows build ($short)" \
+          ls -la dist
+          set +e
+          out=$(gh release create "build-r${{ inputs.run_id }}-$short" dist/* --title "Latest Windows build ($short)" \
             --notes "Built from commit $short. Download the .msi and run it. Windows SmartScreen may warn because this build isn't code-signed: click More info, then Run anyway." \
-            --target "$sha" --latest
+            --target "$sha" --latest 2>&1)
+          code=$?
+          echo "$out"
+          if [ $code -ne 0 ]; then echo "::error::release create failed: $(echo "$out" | tr '\n' ' ' | cut -c1-900)"; exit 1; fi
