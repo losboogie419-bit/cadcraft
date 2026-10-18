@@ -1,6 +1,6 @@
 # FA fork: build the Windows x64 installer (MSI) and portable zip on every push to main, and
-# publish them as the "Latest Windows build" release so they can be downloaded from the
-# Releases page. Unsigned (no code-signing certificate), so Windows SmartScreen warns once.
+# publish them on the `downloads` branch at a fixed public link:
+# https://github.com/<owner>/cadcraft/raw/downloads/cadcraft-windows-x64.msi Unsigned (no code-signing certificate), so Windows SmartScreen warns once.
 name: Windows build
 
 on:
@@ -59,19 +59,19 @@ jobs:
           name: cadcraft-fa-windows-x64
           path: dist/release/*
 
-      - name: Publish "Latest Windows build" release
-        shell: pwsh
+      - name: Publish to the downloads branch (fixed public link)
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $sha = "${{ github.sha }}".Substring(0, 7)
-          $tag = "build-${{ github.run_number }}-$sha"
-          $date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')
-          $notes = "Built $date UTC from commit $sha. Download the .msi and run it. Windows SmartScreen may warn because this build isn't code-signed: click More info, then Run anyway."
-          $files = (Get-ChildItem dist/release/*).FullName
-          gh release create $tag @files --title "Latest Windows build ($sha)" --notes $notes --target ${{ github.sha }} --latest
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          # Keep the newest 3 builds.
-          $old = gh release list --limit 50 --json tagName --jq '.[].tagName' | Where-Object { $_ -like 'build-*' } | Select-Object -Skip 3
-          foreach ($t in $old) { gh release delete $t --yes --cleanup-tag }
-          $global:LASTEXITCODE = 0
+          set -e
+          sha="${{ github.sha }}"
+          mkdir pub && cd pub
+          git init -q -b downloads
+          cp ../dist/release/*.msi cadcraft-windows-x64.msi
+          cp ../dist/release/*portable.zip cadcraft-windows-x64-portable.zip
+          printf "# CADCraft FA — latest Windows build\n\nBuilt from commit %s.\n\n- Installer: cadcraft-windows-x64.msi\n- Portable: cadcraft-windows-x64-portable.zip\n\nUnsigned: Windows SmartScreen may warn — More info, then Run anyway.\n" "${sha:0:7}" > README.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A && git commit -q -m "Windows build ${sha:0:7}"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" downloads

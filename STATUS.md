@@ -8,7 +8,7 @@ This fork of CADCraft is a fire alarm drafting tool. **Read this before planning
 - **Code suggestions from another bot** go in a **pull request** from its own branch. Nothing is merged unless the owner or Claude accepts it.
 - **Minor problems** (a wrong DIP switch, a label in the wrong spot) are marked *Minor*. The owner may fix them by hand, and Claude batches them into the next build instead of rebuilding for each one.
 - **The repo is public.** Never put job drawings, addresses, panel names or other job details in code, issues or tests. Tests use made-up sample shapes.
-- **Every push to `main` builds the Windows installer** (about 15–30 min). It lands on the Releases page as **Latest Windows build**. Commits that only touch docs say `[skip ci]`.
+- **Every push to `main` builds the Windows installer** (about 15–30 min). The newest one is always at **https://github.com/losboogie419-bit/cadcraft/raw/downloads/cadcraft-windows-x64.msi** (public, no login). Commits that only touch docs say `[skip ci]`.
 
 ## The owner's rules (apply to everything)
 - Black background, amber/yellow (#FFB000) accent.
