@@ -184,6 +184,13 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
                 None => Ok(Value::Null),
             }
         }
+        "farunsheet" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
+            let picked = app.services.pick_save.as_ref().and_then(|f| f("Run_Sheet.xlsx"));
+            match picked {
+                Some(p) => app.run("farunsheet", json!({ "path": p })),
+                None => Ok(Value::Null),
+            }
+        }
         "fapointsexport" if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) => {
             let picked = app.services.pick_save.as_ref().and_then(|f| f("Point_List.xlsx"));
             match picked {

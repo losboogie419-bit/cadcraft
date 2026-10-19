@@ -14,7 +14,7 @@
 //! out. Rule checks that need terminal roles (relay common on an SLC, a jumper onto a card) need
 //! verified cut-sheet terminals and are not done here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cadcraft_color::{Color, Rgb};
 use cadcraft_doc::{Circle, Common, EntityKind, Handle, Layer, Space};
@@ -289,6 +289,40 @@ impl Net {
     }
 }
 
+/// Pages holding terminal blocks: at least 20 screws that sit in the middle of a straight,
+/// evenly spaced row of equal screws (a terminal strip).
+fn terminal_pages(screws: &[(Vec2, f64)], pages: usize, page_of: &dyn Fn(Vec2) -> usize) -> HashSet<usize> {
+    let mut per_page = vec![0usize; pages];
+    let n = screws.len().min(50_000);
+    // Grid by position so each screw only looks at its neighbours.
+    let cell = screws.iter().take(n).map(|s| s.1).fold(0.0f64, f64::max).max(1e-9) * 6.0;
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, (c, _)) in screws.iter().enumerate().take(n) {
+        grid.entry(((c.x / cell).floor() as i64, (c.y / cell).floor() as i64)).or_default().push(i);
+    }
+    for (i, (c, r)) in screws.iter().enumerate().take(n) {
+        let (gx, gy) = ((c.x / cell).floor() as i64, (c.y / cell).floor() as i64);
+        let mut mates: Vec<Vec2> = Vec::new();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for j in grid.get(&(gx + dx, gy + dy)).map(Vec::as_slice).unwrap_or(&[]) {
+                    let (c2, r2) = screws[*j];
+                    let d = (c2 - *c).len();
+                    if *j != i && (r2 - r).abs() <= r * 0.15 && d >= r * 2.0 && d <= r * 4.0 {
+                        mates.push(c2 - *c);
+                    }
+                }
+            }
+        }
+        // Two mates in opposite directions at the same spacing: the middle of a row.
+        let middle = mates.iter().any(|a| mates.iter().any(|b| (*a + *b).len() <= r * 0.3));
+        if middle && let Some(k) = per_page.get_mut(page_of(*c)) {
+            *k += 1;
+        }
+    }
+    per_page.iter().enumerate().filter(|(_, k)| **k >= 20).map(|(i, _)| i).collect()
+}
+
 fn tol_of(p: &Value) -> f64 {
     p.get("tol").and_then(Value::as_f64).filter(|t| t.is_finite() && *t > 0.0 && *t < 1e6).unwrap_or(0.008)
 }
@@ -401,6 +435,41 @@ fn run_wirecheck(s: &mut Session, p: &Value) -> Result<Value> {
     let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
     let reach = p.get("reach").and_then(Value::as_f64).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(tol * 40.0);
     let net = gather(s, tol)?;
+    // Wire Check is for panel builds and cut sheets: only pages with terminal blocks (rows of
+    // equal screws) are checked. Floor plans don't show how wire is run.
+    let pages: Vec<[f64; 4]> = {
+        let st = s.state()?;
+        st.doc
+            .space(&Space::Model)
+            .map(|m| {
+                m.iter()
+                    .filter(|e| e.common.layer == "PDF_PAGES")
+                    .filter_map(|e| match &e.kind {
+                        EntityKind::LwPolyline(pl) => {
+                            let xs = pl.vertices.iter().map(|v| v.p.x);
+                            let ys = pl.vertices.iter().map(|v| v.p.y);
+                            Some([
+                                xs.clone().fold(f64::INFINITY, f64::min),
+                                ys.clone().fold(f64::INFINITY, f64::min),
+                                xs.fold(f64::NEG_INFINITY, f64::max),
+                                ys.fold(f64::NEG_INFINITY, f64::max),
+                            ])
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let page_of = |q: Vec2| pages.iter().position(|f| q.x >= f[0] && q.x <= f[2] && q.y >= f[1] && q.y <= f[3]).unwrap_or(0);
+    let terminal_pages = terminal_pages(&net.screws, pages.len().max(1), &page_of);
+    if terminal_pages.is_empty() && !all {
+        return Ok(json!({
+            "count": 0,
+            "loose": [],
+            "message": "No terminal blocks on this sheet — Wire Check is for panel builds and cut sheets",
+        }));
+    }
     // Wire layers, when the drawing has them (WIRE, SLC, NAC, CIRCUIT, CABLE in the name), or
     // the `layers` given: only lines on them are checked.
     let wire_layers: Vec<String> = match p.get("layers").and_then(Value::as_array) {
@@ -433,6 +502,9 @@ fn run_wirecheck(s: &mut Session, p: &Value) -> Result<Value> {
         }
         for e in net.ends(pi) {
             if window.is_some_and(|w| e.x < w[0] || e.x > w[2] || e.y < w[1] || e.y > w[3]) {
+                continue;
+            }
+            if !all && !terminal_pages.contains(&page_of(e)) {
                 continue;
             }
             let touches = net.near(e).into_iter().any(|(pj, sj)| pj != pi && net.seg(pj, sj).is_some_and(|(a, b)| seg_dist(a, b, e) <= tol))
@@ -518,6 +590,13 @@ mod tests {
         let r = s.execute("wirecheck", &json!({ "all": true })).unwrap_or_default();
         assert_eq!(r["count"], 3, "(1,1) and both ends of the far stub are loose: {r}");
         // By default only an end that comes near a terminal and misses it counts.
+        let r = s.execute("wirecheck", &json!({})).unwrap_or_default();
+        assert_eq!(r["count"], 0, "no terminal blocks: nothing checked: {r}");
+        assert!(r["message"].as_str().unwrap_or("").contains("No terminal blocks"), "{r}");
+        // A terminal strip far away makes this a panel sheet.
+        for i in 0..24 {
+            let _ = s.add_entity(EntityKind::Circle(Circle { center: Vec3::new(10.0 + f64::from(i) * 0.06, 10.0, 0.0), radius: 0.02 }));
+        }
         let r = s.execute("wirecheck", &json!({})).unwrap_or_default();
         assert_eq!(r["count"], 0, "no end is near a terminal: {r}");
         let _ = s.add_entity(EntityKind::Circle(Circle { center: Vec3::new(1.0, 1.1, 0.0), radius: 0.02 }));

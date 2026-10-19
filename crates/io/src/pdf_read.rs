@@ -683,9 +683,12 @@ mod native {
                         }
                         let paths = std::mem::take(&mut subs);
                         let opn = op.operator.as_str();
-                        if opn != "n" {
-                            let stroke = !matches!(opn, "f" | "F" | "f*");
-                            self.paint(&paths, &gs, stroke)?;
+                        // B, B*, b, b*: fill, then stroke the same path.
+                        if matches!(opn, "f" | "F" | "f*" | "B" | "B*" | "b" | "b*") {
+                            self.paint(&paths, &gs, false)?;
+                        }
+                        if matches!(opn, "S" | "s" | "B" | "B*" | "b" | "b*") {
+                            self.paint(&paths, &gs, true)?;
                         }
                     }
                     "W" | "W*" => {}
@@ -914,6 +917,46 @@ mod native {
     struct Label {
         text: String,
         r: [f64; 4],
+    }
+
+    /// AutoCAD control codes in label text: %%U / %%O / %%K (underline, overline, strike) are
+    /// dropped; %%D, %%P, %%C become °, ±, ⌀; %%% is %.
+    pub(crate) fn acad_codes(t: &str) -> String {
+        if !t.contains("%%") {
+            return t.to_string();
+        }
+        let mut out = String::with_capacity(t.len());
+        let mut rest = t;
+        while let Some(i) = rest.find("%%") {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + 2..];
+            let mut c = after.chars();
+            match c.next().map(|c| c.to_ascii_uppercase()) {
+                Some('U' | 'O' | 'K') => rest = c.as_str(),
+                Some('D') => {
+                    out.push('°');
+                    rest = c.as_str();
+                }
+                Some('P') => {
+                    out.push('±');
+                    rest = c.as_str();
+                }
+                Some('C') => {
+                    out.push('⌀');
+                    rest = c.as_str();
+                }
+                Some('%') => {
+                    out.push('%');
+                    rest = c.as_str();
+                }
+                _ => {
+                    out.push_str("%%");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     fn pdf_text(o: &Object) -> Option<String> {
@@ -1195,7 +1238,7 @@ mod native {
                 if !title.contains("SHX") {
                     continue;
                 }
-                let Some(text) = a.get(b"Contents").ok().and_then(pdf_text) else { continue };
+                let Some(text) = a.get(b"Contents").ok().and_then(pdf_text).map(|t| acad_codes(&t)) else { continue };
                 let Some(r) = a.get(b"Rect").ok().and_then(|o| o.as_array().ok()).map(|v| v.iter().filter_map(num).collect::<Vec<_>>()) else {
                     continue;
                 };
@@ -1311,6 +1354,12 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn acad_codes_are_cleaned() {
+            assert_eq!(acad_codes("%%USHEET #:"), "SHEET #:");
+            assert_eq!(acad_codes("45%%D 50%%% %%C2"), "45° 50% ⌀2");
+        }
 
         #[test]
         fn rotate_270_is_upright() {

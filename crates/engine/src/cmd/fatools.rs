@@ -34,7 +34,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(has_doc),
         CommandSpec::new("farev", "Stamp Revision", run_farev)
             .menu(&["Tools", "Fire Alarm", "Stamp Revision..."])
-            .params("{rev?: \"B\" (default: the next letter), path?: previous revision's DXF/DWG to compare with, author?, note?, date?: YYYY-MM-DD (default today, UTC), at?: [x, y] (default lower right of the drawing)} → {stamp, added, changed, removed, regions}")
+            .params("{rev?: \"B\" (default: the next letter), path?: previous revision's DXF/DWG to compare with, author?, note?, date?: YYYY-MM-DD (default today, local time), at?: [x, y] (default lower right of the drawing)} → {stamp, added, changed, removed, regions}")
             .enabled(has_doc),
     ]
 }
