@@ -28,6 +28,13 @@ pub struct State {
     pub missed_until: f64,
     /// Selection seen last frame (to notice a room picked on the drawing).
     last_sel: Vec<u64>,
+    /// Initials for sheet status.
+    pub initials: String,
+    /// Field change note being typed for the focused device.
+    pub field_text: String,
+    /// Drawing set search.
+    pub set_query: String,
+    pub set_hits: Vec<Value>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -181,7 +188,61 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         if ui.button(crate::tl!("Export run sheet…")).clicked() {
             let _ = crate::menus::run_ui_command(app, "farunsheet", &Value::Null);
         }
+        ui.separator();
+        ui.label(crate::tl!("Initials"));
+        ui.add(egui::TextEdit::singleline(&mut st.initials).desired_width(36.0));
     });
+    // Search the whole drawing set.
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(crate::tl!("Index drawing set…")).on_hover_text(crate::tl!("Pick any drawing in the set's folder")).clicked() {
+            let picked = app.services.pick_file.as_ref().and_then(|f| f("Any drawing in the set (PDF, DXF, DWG)", &["pdf", "dxf", "dwg"]));
+            if let Some(p) = picked {
+                let folder = std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+                match app.run("faindex", json!({ "folder": folder })) {
+                    Ok(_) => {}
+                    Err(e) => app.set_status(e),
+                }
+            }
+        }
+        let r =
+            ui.add(egui::TextEdit::singleline(&mut st.set_query).hint_text(crate::tl!("Search the set: address, room, tag")).desired_width(240.0));
+        if (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) || ui.button(crate::tl!("Search")).clicked() {
+            match app.run("fasearch", json!({ "text": st.set_query })) {
+                Ok(v) => st.set_hits = v["hits"].as_array().cloned().unwrap_or_default(),
+                Err(e) => {
+                    st.set_hits.clear();
+                    app.set_status(e);
+                }
+            }
+        }
+        if !st.set_hits.is_empty() && ui.small_button(crate::tl!("Clear results")).clicked() {
+            st.set_hits.clear();
+        }
+    });
+    if !st.set_hits.is_empty() {
+        egui::ScrollArea::vertical().id_salt("pl-set-hits").max_height(120.0).show(ui, |ui| {
+            for h in st.set_hits.clone().iter().take(200) {
+                let file = h["file"].as_str().unwrap_or("").to_string();
+                let short = std::path::Path::new(&file).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                let label = format!(
+                    "{}  {}  —  {}  sheet {}",
+                    h["kind"].as_str().unwrap_or(""),
+                    h["value"].as_str().unwrap_or(""),
+                    short,
+                    h["sheet"].as_str().unwrap_or("")
+                );
+                if ui.selectable_label(false, label).clicked() {
+                    let here = app.session.state().ok().and_then(|d| d.path.clone()).is_some_and(|p| p == file);
+                    if !here && let Err(e) = app.run("open", json!({ "path": file })) {
+                        app.set_status(e);
+                        continue;
+                    }
+                    let (x, y) = (h["at"][0].as_f64().unwrap_or(0.0), h["at"][1].as_f64().unwrap_or(0.0));
+                    let _ = app.run("zoom", json!({ "mode": "window", "p1": [x - 1.5, y - 1.0], "p2": [x + 1.5, y + 1.0] }));
+                }
+            }
+        });
+    }
 
     if devices.is_empty() {
         ui.add_space(8.0);
@@ -215,6 +276,22 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             if n("green") > 0 && ui.small_button(crate::tl!("Accept greens")).clicked() {
                 let _ = app.run("fapointaccept", json!({ "allGreen": true, "page": page }));
             }
+            let key = here.first().map(|d| if d.sheet.is_empty() { format!("page {}", d.page) } else { d.sheet.clone() }).unwrap_or_default();
+            let cur = fa.as_ref().and_then(|f| f.job.sheets.get(&key)).cloned().unwrap_or_default();
+            let shown = if cur.status.is_empty() { "not started".to_string() } else { cur.status.clone() };
+            egui::ComboBox::from_id_salt(("pl-sheet", *page)).selected_text(&shown).width(100.0).show_ui(ui, |ui| {
+                for s in ["not started", "in progress", "done"] {
+                    if ui.selectable_label(shown == s, s).clicked() && shown != s {
+                        let r = app.run("fasheet", json!({ "sheet": key, "status": s, "initials": st.initials }));
+                        if let Err(e) = r {
+                            app.set_status(e);
+                        }
+                    }
+                }
+            });
+            if !cur.date.is_empty() {
+                ui.label(RichText::new(format!("{} {}", cur.date, cur.initials)).color(t.text_dim));
+            }
             ui.separator();
         }
     });
@@ -225,6 +302,27 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         }
     }
 
+    // Field changes for the focused device.
+    if let Some(d) = st.focus.as_ref().and_then(|id| devices.iter().find(|d| &d.id == id)).cloned() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(format!("{}:", if d.address.is_empty() { "?" } else { &d.address })).strong());
+            ui.label(crate::tl!("Field change"));
+            ui.add(egui::TextEdit::singleline(&mut st.field_text).hint_text(crate::tl!("details")).desired_width(180.0));
+            for (label, change) in
+                [("Moved", "moved"), ("Swapped", "swapped"), ("Dual address", "dual address"), ("Removed", "removed"), ("Other", "other")]
+            {
+                if ui.small_button(crate::i18n::t(label)).clicked() {
+                    match app.run("fafield", json!({ "ids": [d.id], "change": change, "text": st.field_text })) {
+                        Ok(_) => st.field_text.clear(),
+                        Err(e) => app.set_status(e),
+                    }
+                }
+            }
+            if ui.small_button(crate::tl!("Clear field changes")).clicked() {
+                let _ = app.run("fafield", json!({ "ids": [d.id], "clear": true }));
+            }
+        });
+    }
     // The table.
     let rows: Vec<&Device> = devices.iter().filter(|d| shows(&st, d)).collect();
     let widths = [26.0, 110.0, 70.0, 170.0, 170.0, 220.0, 70.0, 70.0, 360.0];

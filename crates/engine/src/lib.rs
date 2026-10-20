@@ -127,6 +127,9 @@ pub struct DocState {
     pub selection: Vec<Handle>,
     pub previous_selection: Vec<Handle>,
     pub path: Option<String>,
+    /// The file the drawing was read from when that isn't a drawing file (an imported PDF):
+    /// tools keep their own files next to it.
+    pub source: Option<String>,
     pub title: String,
     pub saved: Arc<Drawing>,
     pub revision: u64,
@@ -159,6 +162,7 @@ impl DocState {
             selection: Vec::new(),
             previous_selection: Vec::new(),
             path,
+            source: None,
             title: title.into(),
             revision: 1,
             space: Space::Model,

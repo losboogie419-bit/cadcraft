@@ -101,6 +101,17 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("fapointset", "Point List: Set Device Fields", run_set)
             .params("{id: device id, function?, equipment?, room?, roomNum?, note?, accepted?: bool} → {device} (the owner's values win over the drawing's and are kept in the job)")
             .enabled(has_doc),
+        CommandSpec::new("fasheet", "Point List: Sheet Status", run_sheet)
+            .params("{sheet: \"73\" | page: n, status: not started | in progress | done, initials?} → {sheets} (done writes a dated snapshot: the sheet's run sheet rows and a marked-up PDF; reopening is logged)")
+            .enabled(has_doc),
+        CommandSpec::new("fafield", "Point List: Field Change", run_field)
+            .params("{change: moved | swapped | dual address | removed | other, text?, ids? | handles? (default: the selection), clear?: true} → {changed} (shown in Comments and on the As-built tab)")
+            .enabled(has_doc),
+        CommandSpec::new("faindex", "Point List: Index a Drawing Set", run_index)
+            .menu(&["Tools", "Fire Alarm", "Point List", "Index Drawing Set..."])
+            .params("{folder} → {files, entries} (every address, room, equipment tag and label in the folder's PDF/DXF/DWG files, saved as .fa_set_index.json there)"),
+        CommandSpec::new("fasearch", "Point List: Search the Drawing Set", run_search)
+            .params("{text, folder? (default: the last indexed)} → {hits: [{file, page, sheet, kind, value, at}]}"),
         CommandSpec::new("fapointnote", "Point List: Note on Selected", run_note)
             .params("{note: text (empty clears), handles?: (default: the selection)} → {noted}")
             .enabled(has_doc),
@@ -189,6 +200,10 @@ pub struct Job {
     pub notes: BTreeMap<String, String>,
     /// Words near a device that say what it does (whole words; longer phrases anywhere).
     pub functions: Vec<FunctionRule>,
+    /// Each sheet's review status, by sheet number (or "page N").
+    pub sheets: BTreeMap<String, SheetState>,
+    /// Field changes (moved, swapped, dual address, removed), by full address or device id.
+    pub field: BTreeMap<String, Vec<FieldChange>>,
     /// Anything else in the file (kept as it was).
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -223,9 +238,81 @@ impl Default for Job {
             decisions: BTreeMap::new(),
             notes: BTreeMap::new(),
             functions: default_functions(),
+            sheets: BTreeMap::new(),
+            field: BTreeMap::new(),
             extra: Map::new(),
         }
     }
+}
+
+/// A sheet's review status: not started, in progress or done, with who and when.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SheetState {
+    pub status: String,
+    pub date: String,
+    pub initials: String,
+    /// Every change of status, oldest first ("2026-10-19 14:02 AB done").
+    pub history: Vec<String>,
+}
+
+/// A change found in the field (moved, swapped, dual address, removed, other).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FieldChange {
+    pub change: String,
+    pub text: String,
+    pub date: String,
+    pub by: String,
+}
+
+/// Now, local time: "YYYY-MM-DD HH:MM".
+fn stamp() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        String::new()
+    }
+}
+
+/// Who is working: the computer's user name.
+fn user() -> String {
+    std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default()
+}
+
+/// Append to the job's audit log (`<job>.log.csv`): when, who, what, device, before, after.
+/// The log is only ever added to.
+fn audit(st: &FaState, rows: &[(String, String, String, String)]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = &st.path {
+        use std::io::Write;
+        let log = format!("{path}.log.csv");
+        let new = !std::path::Path::new(&log).exists();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            if new {
+                let _ = writeln!(f, "When,Who,What,Device,Before,After");
+            }
+            let (when, who) = (stamp(), user());
+            for (what, dev, before, after) in rows {
+                let line = [when.clone(), who.clone(), what.clone(), dev.clone(), before.clone(), after.clone()];
+                let _ = writeln!(f, "{}", csv_line(&line));
+            }
+        }
+    }
+    let _ = (st, rows);
+}
+
+/// The key for a device's notes and field changes.
+fn note_key(d: &Device) -> String {
+    if d.key.is_empty() { d.id.clone() } else { d.key.clone() }
+}
+
+/// A sheet's key for its status: the title-block sheet number, else "page N".
+fn sheet_key(d: &Device) -> String {
+    if d.sheet.is_empty() { format!("page {}", d.page) } else { d.sheet.clone() }
 }
 
 /// Words near a device that say what it does.
@@ -1593,6 +1680,17 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
         if let Some(n) = job.notes.get(&dv.key).filter(|_| !dv.key.is_empty()).or_else(|| job.notes.get(&dv.id)) {
             dv.note = n.clone();
         }
+        let fk = if dv.key.is_empty() { dv.id.clone() } else { dv.key.clone() };
+        if let Some(list) = job.field.get(&fk) {
+            for c in list {
+                dv.flags.push(format!(
+                    "FIELD {}: {}{}",
+                    c.change,
+                    c.text,
+                    if c.date.is_empty() { String::new() } else { format!(" ({} {})", c.date, c.by) }
+                ));
+            }
+        }
     }
     // Panel report, duplicates, labels, status.
     let mut count: HashMap<String, usize> = HashMap::new();
@@ -1633,7 +1731,7 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
             "checked".into()
         } else if red {
             "red".into()
-        } else if dv.flags.iter().any(|f| !f.starts_with("function") && !f.starts_with("equipment")) {
+        } else if dv.flags.iter().any(|f| !f.starts_with("function") && !f.starts_with("equipment") && !f.starts_with("FIELD")) {
             "amber".into()
         } else {
             "green".into()
@@ -1986,6 +2084,22 @@ fn run_report(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn run_points(s: &mut Session, p: &Value) -> Result<Value> {
     let mut st = load_state(s);
+    // No job file yet: keep the review next to the drawing (`<drawing>.pointlist.json`), and pick
+    // up an earlier review of it when there is one.
+    #[cfg(not(target_arch = "wasm32"))]
+    if st.path.is_none()
+        && let Some(dp) = s.state().ok().and_then(|ds| ds.path.clone().or_else(|| ds.source.clone()))
+    {
+        let jp = format!("{dp}.pointlist.json");
+        if let Ok(text) = std::fs::read_to_string(&jp)
+            && let Ok(job) = serde_json::from_str::<Job>(&text)
+            && st.job.decisions.is_empty()
+            && st.job.notes.is_empty()
+        {
+            st.job = job;
+        }
+        st.path = Some(jp);
+    }
     extract(s, &mut st)?;
     if let Some(o) = p.get("onlyProblems").and_then(Value::as_bool) {
         st.only_problems = o;
@@ -2077,13 +2191,21 @@ fn run_assign_room(s: &mut Session, p: &Value) -> Result<Value> {
     if idx.is_empty() {
         return Err(bad(CMD, "select the devices' markers (layer FA-POINTLIST) first"));
     }
+    let mut log = Vec::new();
     for i in &idx {
-        let id = st.devices[*i].id.clone();
-        let d = st.job.decisions.entry(id).or_default();
+        let dv = st.devices[*i].clone();
+        let d = st.job.decisions.entry(dv.id.clone()).or_default();
         d.room_num = num.clone();
         d.room = name.clone();
         d.accepted = true;
+        log.push((
+            "room".to_string(),
+            dv.address.clone(),
+            format!("{} {}", dv.room_num, dv.room).trim().to_string(),
+            format!("{num} {name}").trim().to_string(),
+        ));
     }
+    audit(&st, &log);
     save_job(&st)?;
     s.fa = Some(st);
     let r = run_points(s, &json!({}))?;
@@ -2110,6 +2232,8 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
     let Some(dv) = st.devices.iter().find(|d| d.id == id).cloned() else {
         return Err(bad(CMD, format!("no device {id}; run FAPOINTS first")));
     };
+    let before = serde_json::to_string(st.job.decisions.get(&id).unwrap_or(&Decision::default())).unwrap_or_default();
+    let note_before = st.job.notes.get(&note_key(&dv)).cloned().unwrap_or_default();
     let dec = st.job.decisions.entry(id.clone()).or_default();
     let take = |k: &str| str_param(p, k).map(|v| v.trim().to_string());
     if let Some(v) = take("function") {
@@ -2128,18 +2252,279 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
         dec.accepted = a;
     }
     if let Some(v) = take("note") {
-        let k = if dv.key.is_empty() { dv.id.clone() } else { dv.key.clone() };
+        let k = note_key(&dv);
         if v.is_empty() {
             st.job.notes.remove(&k);
         } else {
             st.job.notes.insert(k, v);
         }
     }
+    let after = serde_json::to_string(st.job.decisions.get(&id).unwrap_or(&Decision::default())).unwrap_or_default();
+    let note_after = st.job.notes.get(&note_key(&dv)).cloned().unwrap_or_default();
+    let mut log = Vec::new();
+    if before != after {
+        log.push(("set".to_string(), dv.address.clone(), before, after));
+    }
+    if note_before != note_after {
+        log.push(("note".to_string(), dv.address.clone(), note_before, note_after));
+    }
+    audit(&st, &log);
     save_job(&st)?;
     s.fa = Some(st);
     let _ = run_points(s, &json!({}))?;
     let dv = s.fa.as_ref().and_then(|st| st.devices.iter().find(|d| d.id == id).cloned());
     Ok(json!({ "device": dv, "message": format!("{} updated", dv.as_ref().map(|d| d.address.clone()).unwrap_or(id)) }))
+}
+
+fn run_sheet(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "fasheet";
+    let mut st = load_state(s);
+    if st.devices.is_empty() {
+        extract(s, &mut st)?;
+    }
+    let key = match (str_param(p, "sheet"), p.get("page").and_then(Value::as_u64)) {
+        (Some(k), _) => k.trim().to_string(),
+        (None, Some(pg)) => st.devices.iter().find(|d| d.page as u64 == pg).map(sheet_key).unwrap_or(format!("page {pg}")),
+        (None, None) => return Err(bad(CMD, "`sheet` (its number) or `page` is required")),
+    };
+    let status = str_param(p, "status").map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
+    if !matches!(status.as_str(), "not started" | "in progress" | "done") {
+        return Err(bad(CMD, "`status` must be not started, in progress or done"));
+    }
+    let initials = str_param(p, "initials").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_else(user);
+    let now = stamp();
+    let e = st.job.sheets.entry(key.clone()).or_default();
+    let before = e.status.clone();
+    let reopened = before == "done" && status != "done";
+    e.status = status.clone();
+    e.date = now.clone();
+    e.initials = initials.clone();
+    e.history.push(format!("{now} {initials} {}{status}", if reopened { "reopened: " } else { "" }));
+    audit(&st, &[("sheet".into(), key.clone(), before, status.clone())]);
+    save_job(&st)?;
+    // Done: a locked, dated copy of the sheet's rows and a marked-up PDF of the page.
+    let mut written = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    if status == "done"
+        && let Some(jp) = st.path.clone()
+    {
+        let stem = jp.trim_end_matches(".json").trim_end_matches(".pointlist").to_string();
+        let day = now.get(..10).unwrap_or("").to_string();
+        let safe: String = key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let mut sub = st.clone();
+        sub.devices.retain(|d| sheet_key(d) == key);
+        if let Some(h) = SHEETS.get() {
+            let name = unique(&format!("{stem}_Sheet{safe}_{day}_runsheet.xlsx"));
+            if let Ok(bytes) = (h.write)(&runsheet_workbook(&sub))
+                && std::fs::write(&name, bytes).is_ok()
+            {
+                written.push(name);
+            }
+        }
+        let page = sub.devices.first().map(|d| d.page).unwrap_or(1);
+        if let (Some(io), Some(f)) = (super::file::io(), st.pages.get(page.saturating_sub(1)))
+            && let Some(plot) = io.plot
+        {
+            let ds = s.state()?;
+            let opts = json!({ "window": [[f[0], f[1]], [f[2], f[3]]], "fit": true });
+            if let Ok(bytes) = plot(&ds.doc, &Space::Model, &opts) {
+                let name = unique(&format!("{stem}_Sheet{safe}_{day}_markup.pdf"));
+                if std::fs::write(&name, bytes).is_ok() {
+                    written.push(name);
+                }
+            }
+        }
+    }
+    let sheets = serde_json::to_value(&st.job.sheets).unwrap_or_default();
+    s.fa = Some(st);
+    Ok(
+        json!({ "sheets": sheets, "written": written, "message": format!("Sheet {key}: {status}{}", if written.is_empty() { String::new() } else { format!(" — snapshot {}", written.join(", ")) }) }),
+    )
+}
+
+/// A file name not used yet (adds -2, -3… before the extension).
+#[cfg(not(target_arch = "wasm32"))]
+fn unique(name: &str) -> String {
+    if !std::path::Path::new(name).exists() {
+        return name.to_string();
+    }
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    (2..1000).map(|k| format!("{stem}-{k}.{ext}")).find(|n| !std::path::Path::new(n).exists()).unwrap_or_else(|| name.to_string())
+}
+
+fn run_field(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "fafield";
+    let mut st = load_state(s);
+    if st.devices.is_empty() {
+        return Err(bad(CMD, "run FAPOINTS (Find Devices and Rooms) first"));
+    }
+    let idx = picked(s, &st, p);
+    if idx.is_empty() {
+        return Err(bad(CMD, "pick the devices (their highlighted address, or `ids`)"));
+    }
+    let clear = p.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let change = str_param(p, "change").map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
+    if !clear && !matches!(change.as_str(), "moved" | "swapped" | "dual address" | "removed" | "other") {
+        return Err(bad(CMD, "`change` must be moved, swapped, dual address, removed or other"));
+    }
+    let text = str_param(p, "text").map(|v| v.trim().to_string()).unwrap_or_default();
+    let mut log = Vec::new();
+    for i in &idx {
+        let dv = st.devices[*i].clone();
+        let k = note_key(&dv);
+        if clear {
+            st.job.field.remove(&k);
+            log.push(("field cleared".to_string(), dv.address.clone(), String::new(), String::new()));
+        } else {
+            st.job.field.entry(k).or_default().push(FieldChange { change: change.clone(), text: text.clone(), date: stamp(), by: user() });
+            log.push((format!("field {change}"), dv.address.clone(), String::new(), text.clone()));
+        }
+    }
+    audit(&st, &log);
+    save_job(&st)?;
+    s.fa = Some(st);
+    let _ = run_points(s, &json!({}))?;
+    Ok(
+        json!({ "changed": idx.len(), "message": format!("{} device(s): field change {}", idx.len(), if clear { "cleared".to_string() } else { change }) }),
+    )
+}
+
+/// One searchable thing in a drawing set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetEntry {
+    pub file: String,
+    pub page: usize,
+    pub sheet: String,
+    /// address | room | equipment | text
+    pub kind: String,
+    pub value: String,
+    pub at: [f64; 2],
+}
+
+fn run_index(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "faindex";
+    let folder = str_param(p, "folder").ok_or_else(|| bad(CMD, "`folder` is required"))?.to_string();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, folder);
+        Err(bad(CMD, "indexing a folder needs the desktop app"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let io = super::file::io().ok_or_else(|| bad(CMD, "file formats are not available in this build"))?;
+        let job = load_state(s).job;
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
+            .map_err(|e| bad(CMD, format!("{folder}: {e}")))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "pdf" | "dxf" | "dwg")))
+            .collect();
+        files.sort();
+        files.truncate(500);
+        let mut entries: Vec<SetEntry> = Vec::new();
+        let mut failed = Vec::new();
+        for f in &files {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let Ok(bytes) = std::fs::read(f) else {
+                failed.push(name);
+                continue;
+            };
+            let Ok(d) = (io.read)(&bytes, &name) else {
+                failed.push(name);
+                continue;
+            };
+            let sc = scan(&d, &job.boundary_layer);
+            let ext = d.extents(&Space::Model);
+            let pages = if sc.pages.is_empty() && !ext.is_empty() { vec![[ext.min.x, ext.min.y, ext.max.x, ext.max.y]] } else { sc.pages.clone() };
+            let titles: Vec<String> = (1..=pages.len().max(1)).map(|pg| title_fields(&sc.texts, &pages, pg).0).collect();
+            let mut partial = Vec::new();
+            let addrs = address_texts(&sc.texts, &job.address_layers, &mut partial);
+            let used: HashSet<usize> = addrs.iter().flat_map(|a| a.pieces.iter().copied()).collect();
+            let rooms = find_rooms(&job, &sc);
+            let mut push = |kind: &str, value: String, at: Vec2| {
+                let page = page_of(&pages, at);
+                entries.push(SetEntry {
+                    file: f.to_string_lossy().to_string(),
+                    page,
+                    sheet: titles.get(page - 1).cloned().unwrap_or_default(),
+                    kind: kind.into(),
+                    value,
+                    at: [at.x, at.y],
+                });
+            };
+            for a in &addrs {
+                push("address", drawn(&a.raw), a.at);
+            }
+            for r in &rooms {
+                push("room", if r.name.is_empty() { r.num.clone() } else { format!("{} ({})", r.name, r.num) }, r.at);
+            }
+            for (i, t) in sc.texts.iter().enumerate() {
+                if used.contains(&i) || t.value.trim().len() < 2 {
+                    continue;
+                }
+                push(if is_tag(&t.value) { "equipment" } else { "text" }, t.value.trim().chars().take(120).collect(), t.center());
+            }
+            if entries.len() > 2_000_000 {
+                break;
+            }
+        }
+        let out = std::path::Path::new(&folder).join(".fa_set_index.json");
+        let text = serde_json::to_string(&json!({ "folder": folder, "built": stamp(), "entries": entries })).map_err(|e| bad(CMD, e.to_string()))?;
+        std::fs::write(&out, text).map_err(|e| bad(CMD, format!("{}: {e}", out.display())))?;
+        let mut st = load_state(s);
+        st.job.extra.insert("setFolder".into(), json!(folder));
+        s.fa = Some(st);
+        Ok(json!({
+            "files": files.len(), "entries": entries.len(), "failed": failed,
+            "message": format!("Indexed {} file(s), {} entries{}", files.len(), entries.len(), if failed.is_empty() { String::new() } else { format!("; couldn't read {}", failed.join(", ")) }),
+        }))
+    }
+}
+
+fn run_search(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "fasearch";
+    let text = str_param(p, "text").map(|t| t.trim().to_ascii_uppercase()).filter(|t| !t.is_empty()).ok_or_else(|| bad(CMD, "`text` is required"))?;
+    let folder =
+        str_param(p, "folder").map(String::from).or_else(|| load_state(s).job.extra.get("setFolder").and_then(Value::as_str).map(String::from));
+    let folder = folder.ok_or_else(|| bad(CMD, "index a drawing set first (FAINDEX), or give `folder`"))?;
+    let path = std::path::Path::new(&folder).join(".fa_set_index.json");
+    let bytes = read_path(CMD, &path.to_string_lossy())?;
+    let v: Value = serde_json::from_slice(&bytes).map_err(|e| bad(CMD, format!("{}: {e}", path.display())))?;
+    let squash = |x: &str| x.to_ascii_uppercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
+    let want = squash(&text);
+    let mut hits: Vec<Value> = v["entries"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|e| {
+                    let val = e["value"].as_str().unwrap_or("");
+                    val.to_ascii_uppercase().contains(&text) || (!want.is_empty() && squash(val).contains(&want))
+                })
+                .take(500)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    // Addresses first, then rooms, equipment, other text.
+    let rank = |e: &Value| match e["kind"].as_str().unwrap_or("") {
+        "address" => 0,
+        "room" => 1,
+        "equipment" => 2,
+        _ => 3,
+    };
+    hits.sort_by_key(rank);
+    let mut message = format!("{} hit(s) for {text}", hits.len());
+    for h in hits.iter().take(15) {
+        let file = std::path::Path::new(h["file"].as_str().unwrap_or("")).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        message.push_str(&format!(
+            "\n  {} {} — {} sheet {}",
+            h["kind"].as_str().unwrap_or(""),
+            h["value"].as_str().unwrap_or(""),
+            file,
+            h["sheet"].as_str().unwrap_or("")
+        ));
+    }
+    Ok(json!({ "hits": hits, "message": message }))
 }
 
 fn run_note(s: &mut Session, p: &Value) -> Result<Value> {
@@ -2196,10 +2581,18 @@ fn run_accept(s: &mut Session, p: &Value) -> Result<Value> {
     if idx.is_empty() {
         return Err(bad(CMD, "nothing to accept: select markers, or use allGreen"));
     }
+    let mut log = Vec::new();
     for i in &idx {
-        let id = st.devices[*i].id.clone();
-        st.job.decisions.entry(id).or_default().accepted = !undo;
+        let dv = st.devices[*i].clone();
+        st.job.decisions.entry(dv.id.clone()).or_default().accepted = !undo;
+        log.push((
+            if undo { "un-accept" } else { "accept" }.to_string(),
+            dv.address.clone(),
+            dv.status.clone(),
+            if undo { String::new() } else { "checked".into() },
+        ));
     }
+    audit(&st, &log);
     save_job(&st)?;
     s.fa = Some(st);
     let r = run_points(s, &json!({}))?;
@@ -2442,6 +2835,34 @@ fn workbook(st: &FaState) -> Value {
         }
     }
     all.push(sheet("Unresolved", &HEAD, un, &WIDTHS));
+    // Field changes, for the as-built record.
+    let mut ab: Vec<(Vec<String>, Vec<&str>)> = Vec::new();
+    for (k, list) in &st.job.field {
+        let dv = st.devices.iter().find(|d| note_key(d) == *k);
+        for c in list {
+            ab.push((
+                vec![
+                    dv.map(|d| d.address.clone()).unwrap_or_else(|| k.clone()),
+                    c.change.to_ascii_uppercase(),
+                    c.text.clone(),
+                    dv.map(room_cell).unwrap_or_default(),
+                    dv.map(|d| d.sheet.clone()).unwrap_or_default(),
+                    c.date.clone(),
+                    c.by.clone(),
+                ],
+                vec!["plain"; 7],
+            ));
+        }
+    }
+    all.push(sheet("As-built", &["Address", "Change", "Details", "Room", "Sheet #", "Date", "By"], ab, &[14.0, 14.0, 40.0, 30.0, 8.0, 16.0, 10.0]));
+    // Sheet status.
+    let ss: Vec<(Vec<String>, Vec<&str>)> = st
+        .job
+        .sheets
+        .iter()
+        .map(|(k, v)| (vec![k.clone(), v.status.to_ascii_uppercase(), v.date.clone(), v.initials.clone(), v.history.join(" | ")], vec!["plain"; 5]))
+        .collect();
+    all.push(sheet("Sheet status", &["Sheet #", "Status", "Date", "Initials", "History"], ss, &[10.0, 14.0, 18.0, 10.0, 80.0]));
     Value::Array(all)
 }
 
@@ -2769,6 +3190,45 @@ mod tests {
         assert_eq!(owner_part("check in field | APP: room close call"), "check in field");
         assert_eq!(owner_part("APP: no room found"), "");
         assert_eq!(comments("mine", &["dup".into()]), "mine | APP: dup");
+    }
+
+    #[test]
+    fn walls_decide_the_room_and_field_changes_show() {
+        let mut s = Session::new();
+        let _ = s.execute("new", &json!({}));
+        let line = |s: &mut Session, a: (f64, f64), b: (f64, f64)| {
+            let _ = s.add_entity(EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(a.0, a.1, 0.0), b: Vec3::new(b.0, b.1, 0.0) }));
+        };
+        // Two closed rooms side by side, sharing the wall at x = 10.
+        for (a, b) in [
+            ((0.0, 0.0), (20.0, 0.0)),
+            ((20.0, 0.0), (20.0, 10.0)),
+            ((20.0, 10.0), (0.0, 10.0)),
+            ((0.0, 10.0), (0.0, 0.0)),
+            ((10.0, 0.0), (10.0, 10.0)),
+        ] {
+            line(&mut s, a, b);
+        }
+        // Something far away so the rooms are a small part of the page.
+        line(&mut s, (0.0, 60.0), (0.1, 60.0));
+        line(&mut s, (80.0, 0.0), (80.1, 0.0));
+        text(&mut s, "B-101", 2.0, 5.0, 0.3);
+        text(&mut s, "B-102", 10.6, 5.0, 0.3);
+        // In room B-101, but nearer to B-102's number.
+        text(&mut s, "N1L1D07", 8.0, 5.0, 0.2);
+        let _ = s.execute("fajob", &json!({ "reset": true }));
+        let r = s.execute("fapoints", &json!({ "mark": false })).unwrap_or_default();
+        assert_eq!(r["devices"][0]["roomNum"], "B-101", "the wall wins over distance: {r}");
+        let id = r["devices"][0]["id"].as_str().unwrap_or("").to_string();
+        let f = s.execute("fafield", &json!({ "ids": [id], "change": "moved", "text": "to the corridor" })).unwrap_or_default();
+        assert_eq!(f["changed"], 1, "{f}");
+        let st = s.fa.clone().unwrap_or_default();
+        assert!(st.devices[0].flags.iter().any(|x| x.starts_with("FIELD moved")), "{:?}", st.devices[0].flags);
+        assert_eq!(st.devices[0].status, "green", "a field note doesn't change the status");
+        let sh = s.execute("fasheet", &json!({ "page": 1, "status": "done", "initials": "AB" })).unwrap_or_default();
+        assert!(sh["message"].as_str().unwrap_or("").contains("done"), "{sh}");
+        let sh = s.execute("fasheet", &json!({ "page": 1, "status": "in progress", "initials": "AB" })).unwrap_or_default();
+        assert!(sh["sheets"].to_string().contains("reopened"), "reopening is logged: {sh}");
     }
 
     #[test]
