@@ -11,6 +11,8 @@ use crate::theme::Tokens;
 
 /// The hatch pattern picker.
 pub mod patterns;
+/// The fire alarm Point List review panel.
+pub mod pointlist;
 /// The QuickCalc palette.
 pub mod quickcalc;
 

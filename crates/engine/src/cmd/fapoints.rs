@@ -98,6 +98,9 @@ pub fn specs() -> Vec<CommandSpec> {
             .menu(&["Tools", "Fire Alarm", "Point List", "Export Run Sheet..."])
             .params("{path: runsheet.xlsx} → {written} (DEVICE ADDRESS, DEVICE TYPE, FUNCTION, ROOM #, INTERFACE EQUIPMENT, COMMENTS; a tab per loop, gap-filled; your comments in an earlier file are kept)")
             .enabled(has_doc),
+        CommandSpec::new("fapointset", "Point List: Set Device Fields", run_set)
+            .params("{id: device id, function?, equipment?, room?, roomNum?, note?, accepted?: bool} → {device} (the owner's values win over the drawing's and are kept in the job)")
+            .enabled(has_doc),
         CommandSpec::new("fapointnote", "Point List: Note on Selected", run_note)
             .params("{note: text (empty clears), handles?: (default: the selection)} → {noted}")
             .enabled(has_doc),
@@ -153,6 +156,9 @@ pub struct Decision {
     pub room_num: String,
     pub room: String,
     pub accepted: bool,
+    /// The owner's own function / equipment (they win over what the drawing suggests).
+    pub function: String,
+    pub equipment: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -302,6 +308,39 @@ fn field_value(texts: &[TextItem], page: [f64; 4], labels: &[&str]) -> String {
 fn title_fields(texts: &[TextItem], pages: &[[f64; 4]], page: usize) -> (String, String) {
     let Some(f) = pages.get(page.saturating_sub(1)).copied() else { return (String::new(), String::new()) };
     (field_value(texts, f, &["SHEET #", "SHEET NO", "SHEET"]), field_value(texts, f, &["DRAWING NO", "DWG NO", "DWG #", "DRAWING #"]))
+}
+
+/// A callout line naming a module by its number ("58 - STATUS"), near the device on its page:
+/// (what it does, the equipment tag heading the callout).
+fn callout(texts: &[TextItem], pages: &[[f64; 4]], page: usize, p: Vec2, num: u32, h: f64) -> Option<(String, String)> {
+    let reach = h * 40.0;
+    let mut best: Option<(f64, &TextItem, String)> = None;
+    for t in texts {
+        let v = t.value.trim();
+        let Some((a, b)) = v.split_once('-') else { continue };
+        let (a, b) = (a.trim(), b.trim().trim_matches('"').trim());
+        if a.parse::<u32>().ok() != Some(num) || b.is_empty() || b.len() > 30 || !b.chars().all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '/') {
+            continue;
+        }
+        let d = (t.center() - p).len();
+        if d <= reach && page_of(pages, t.at) == page && best.as_ref().is_none_or(|x| d < x.0) {
+            best = Some((d, t, b.to_ascii_uppercase()));
+        }
+    }
+    let (_, line, act) = best?;
+    // The tag heading the callout: a tag just above the line, over the same column.
+    let c = line.center();
+    let tag = texts
+        .iter()
+        .filter(|t| {
+            let tc = t.center();
+            let dy = tc.y - c.y;
+            dy > 0.0 && dy < line.height * 6.0 && (t.at.x - line.at.x).abs() < line.height * 8.0 && is_tag(&t.value)
+        })
+        .min_by(|a, b| (a.center().y - c.y).total_cmp(&(b.center().y - c.y)))
+        .map(|t| t.value.trim().to_string())
+        .unwrap_or_default();
+    Some((act, tag))
 }
 
 /// Text around devices: what each does and what it serves.
@@ -468,6 +507,10 @@ pub struct FaState {
     /// Page outlines of the drawing (PDF import), else one page = the extents.
     pub pages: Vec<[f64; 4]>,
     pub drawing_name: String,
+    /// Text that looks like part of an address but wasn't read as one: (page, box, text).
+    pub missed: Vec<(usize, [f64; 4], String)>,
+    /// Markers only on amber and red ("show only what needs me"), kept across reruns.
+    pub only_problems: bool,
 }
 
 // ---------- addresses ----------
@@ -628,6 +671,8 @@ struct Scan {
     /// Line-drawn label strokes (PDF_SHX_GLYPHS): box and geometry, for highlighting a label
     /// that is drawn rather than written.
     glyphs: Vec<([f64; 4], EntityKind)>,
+    /// Linework for room spaces (walls): segments longer than a short stroke.
+    walls: Vec<(Vec2, Vec2)>,
     inserts: Vec<InsertItem>,
     /// Closed polylines on the boundary layer.
     boundaries: Vec<Vec<Vec2>>,
@@ -639,7 +684,7 @@ fn skip(d: &Drawing, layer: &str) -> bool {
 }
 
 fn scan(d: &Drawing, boundary_layer: &str) -> Scan {
-    let mut sc = Scan { glyphs: Vec::new(), texts: Vec::new(), inserts: Vec::new(), boundaries: Vec::new(), pages: Vec::new() };
+    let mut sc = Scan { walls: Vec::new(), glyphs: Vec::new(), texts: Vec::new(), inserts: Vec::new(), boundaries: Vec::new(), pages: Vec::new() };
     let Some(store) = d.space(&Space::Model) else { return sc };
     fn walk(
         d: &Drawing,
@@ -689,6 +734,29 @@ fn scan(d: &Drawing, boundary_layer: &str) -> Scan {
                     sc.glyphs.push((b, e.kind.clone()));
                 }
                 continue;
+            }
+            if depth == 0
+                && !matches!(e.common.layer.as_str(), "PDF_FILLS" | "PDF_WHITE" | "PDF_SHX_GLYPHS" | "PDF_SHX_SEARCH" | "PDF_TEXT_HIDDEN")
+                && sc.walls.len() < 3_000_000
+            {
+                let pts: Vec<Vec2> = match &e.kind {
+                    EntityKind::Line(l) => vec![l.a.xy(), l.b.xy()],
+                    EntityKind::LwPolyline(p) => {
+                        let mut v: Vec<Vec2> = p.vertices.iter().map(|v| v.p).collect();
+                        if p.closed
+                            && let Some(f) = v.first().copied()
+                        {
+                            v.push(f);
+                        }
+                        v
+                    }
+                    _ => Vec::new(),
+                };
+                for w in pts.windows(2) {
+                    if let [a, b] = w {
+                        sc.walls.push((*a, *b));
+                    }
+                }
             }
             match &e.kind {
                 EntityKind::Text(t) => sc.texts.extend(text_item(t, m, layer)),
@@ -906,11 +974,146 @@ pub struct Room {
     pub name: String,
     #[serde(skip)]
     pub at: Vec2,
+    /// The room number and name text on the drawing (lit up when a device is hovered).
+    pub bbox: [f64; 4],
     pub page: usize,
     /// text | boundary
     pub source: String,
     #[serde(skip)]
     pub outline: Option<Vec<Vec2>>,
+}
+
+/// A text's box on the drawing.
+fn text_box(t: &TextItem) -> [f64; 4] {
+    let up = Vec2::new(-t.dir.y, t.dir.x);
+    let pts = [t.at, t.at + t.dir * t.width, t.at + up * t.height, t.at + t.dir * t.width + up * t.height];
+    let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    for q in pts {
+        b = [b[0].min(q.x), b[1].min(q.y), b[2].max(q.x), b[3].max(q.y)];
+    }
+    b
+}
+
+/// Rooms as wall regions: the page's linework is drawn on a grid and each room number floods
+/// the space around it until it meets a wall. A device then belongs to the room(s) whose space it
+/// is in. Spaces that leak out over much of the page are not used.
+struct Regions {
+    /// Per page: grid origin, cell size, columns, rows, cell labels (0 = wall/unset).
+    grids: Vec<([f64; 2], f64, usize, usize, Vec<u32>)>,
+    /// Region label → room indices.
+    rooms: HashMap<(usize, u32), Vec<usize>>,
+}
+
+impl Regions {
+    fn build(sc: &Scan, pages: &[[f64; 4]], rooms: &[Room]) -> Regions {
+        let mut out = Regions { grids: Vec::new(), rooms: HashMap::new() };
+        for (pi, f) in pages.iter().enumerate() {
+            let (w, h) = (f[2] - f[0], f[3] - f[1]);
+            if !(w > 0.0 && h > 0.0) {
+                out.grids.push(([0.0, 0.0], 1.0, 0, 0, Vec::new()));
+                continue;
+            }
+            // About 1000 cells across the page, and no more than 2 million in all.
+            let cell = (w.max(h) / 1000.0).max((w * h / 2.0e6).sqrt());
+            let (cols, rows) = ((w / cell).ceil() as usize + 1, (h / cell).ceil() as usize + 1);
+            const WALL: u32 = u32::MAX;
+            let mut g = vec![0u32; cols * rows];
+            let at = |x: f64, y: f64| -> Option<usize> {
+                let (cx, cy) = ((x - f[0]) / cell, (y - f[1]) / cell);
+                if cx < 0.0 || cy < 0.0 {
+                    return None;
+                }
+                let (cx, cy) = (cx as usize, cy as usize);
+                (cx < cols && cy < rows).then_some(cy * cols + cx)
+            };
+            for (a, b) in &sc.walls {
+                let mid = (*a + *b) * 0.5;
+                if mid.x < f[0] || mid.x > f[2] || mid.y < f[1] || mid.y > f[3] {
+                    continue;
+                }
+                let len = (*b - *a).len();
+                let n = ((len / (cell * 0.5)).ceil() as usize).clamp(1, 20_000);
+                for k in 0..=n {
+                    let q = *a + (*b - *a) * (k as f64 / n as f64);
+                    if let Some(i) = at(q.x, q.y) {
+                        g[i] = WALL;
+                    }
+                }
+            }
+            let limit = cols * rows / 5;
+            let mut label = 0u32;
+            for (ri, r) in rooms.iter().enumerate().filter(|(_, r)| r.page == pi + 1) {
+                let Some(start) = at(r.at.x, r.at.y) else { continue };
+                // The number text itself may sit on linework: start from the nearest open cell.
+                let start = [0isize, 1, -1, 2, -2]
+                    .iter()
+                    .flat_map(|dy| [0isize, 1, -1, 2, -2].iter().map(move |dx| (*dx, *dy)))
+                    .map(|(dx, dy)| start as isize + dy * cols as isize + dx)
+                    .find(|i| *i >= 0 && (*i as usize) < g.len() && g[*i as usize] != WALL);
+                let Some(start) = start.map(|i| i as usize) else { continue };
+                if g[start] != 0 {
+                    out.rooms.entry((pi, g[start])).or_default().push(ri);
+                    continue;
+                }
+                label += 1;
+                let mut stack = vec![start];
+                let mut filled = Vec::new();
+                g[start] = label;
+                while let Some(i) = stack.pop() {
+                    filled.push(i);
+                    if filled.len() > limit {
+                        break;
+                    }
+                    let (x, y) = (i % cols, i / cols);
+                    for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                        if nx < cols && ny < rows {
+                            let j = ny * cols + nx;
+                            if g[j] == 0 {
+                                g[j] = label;
+                                stack.push(j);
+                            }
+                        }
+                    }
+                }
+                if filled.len() > limit {
+                    // Leaked: this space isn't a room. Mark it so later rooms don't refill it.
+                    for i in filled.into_iter().chain(stack) {
+                        g[i] = WALL - 1;
+                    }
+                    continue;
+                }
+                out.rooms.entry((pi, label)).or_default().push(ri);
+            }
+            out.grids.push(([f[0], f[1]], cell, cols, rows, g));
+        }
+        out
+    }
+
+    /// The rooms whose space holds `p` on `page`: None when it isn't in a room's space.
+    fn rooms_at(&self, page: usize, p: Vec2) -> Option<&Vec<usize>> {
+        let (o, cell, cols, rows, g) = self.grids.get(page.checked_sub(1)?)?;
+        let (cx, cy) = (((p.x - o[0]) / cell).floor(), ((p.y - o[1]) / cell).floor());
+        if cx < 0.0 || cy < 0.0 {
+            return None;
+        }
+        let (cx, cy) = (cx as usize, cy as usize);
+        // On a line: the nearest labelled cell close by.
+        for r in 0..3usize {
+            for dy in -(r as isize)..=(r as isize) {
+                for dx in -(r as isize)..=(r as isize) {
+                    let (x, y) = (cx as isize + dx, cy as isize + dy);
+                    if x < 0 || y < 0 || x as usize >= *cols || y as usize >= *rows {
+                        continue;
+                    }
+                    let l = g[y as usize * cols + x as usize];
+                    if l != 0 && l < u32::MAX - 1 {
+                        return self.rooms.get(&(page - 1, l));
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 fn in_poly(p: Vec2, poly: &[Vec2]) -> bool {
@@ -1013,7 +1216,13 @@ fn find_rooms(job: &Job, sc: &Scan) -> Vec<Room> {
         if out.iter().any(|r| r.num == num && r.page == page && (r.at - c).len() < t.height * 6.0) {
             continue;
         }
-        out.push(Room { num, name, at: c, page, source: "text".into(), outline: None });
+        let mut bbox = text_box(t);
+        if let Some(o) = sc.texts.iter().find(|o| !name.is_empty() && o.value.trim() == name && (o.center() - c).len() < t.height.max(o.height) * 4.0)
+        {
+            let b2 = text_box(o);
+            bbox = [bbox[0].min(b2[0]), bbox[1].min(b2[1]), bbox[2].max(b2[2]), bbox[3].max(b2[3])];
+        }
+        out.push(Room { num, name, at: c, bbox, page, source: "text".into(), outline: None });
     }
     // Room outlines: each takes the room number(s) inside it.
     for poly in &sc.boundaries {
@@ -1078,6 +1287,9 @@ pub struct Device {
     /// The address's drawn strokes (a line-drawn label), highlighted instead of the text.
     #[serde(skip)]
     pub strokes: Vec<EntityKind>,
+    /// The address on the drawing, and the room text it was matched to (for hover).
+    pub bbox: [f64; 4],
+    pub room_bbox: Option<[f64; 4]>,
 }
 
 fn load_state(s: &Session) -> FaState {
@@ -1126,6 +1338,8 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
         note: String::new(),
         pieces: Vec::new(),
         strokes: Vec::new(),
+        bbox: [at.x, at.y, at.x, at.y],
+        room_bbox: None,
     };
     let mut partial: Vec<Partial> = Vec::new();
     let addr_texts = address_texts(&sc.texts, &job.address_layers, &mut partial);
@@ -1218,6 +1432,7 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
             }
             h = h.max(t.height);
         }
+        dv.bbox = b;
         let pad = h * 0.6;
         let strokes: Vec<EntityKind> = sc
             .glyphs
@@ -1259,18 +1474,37 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
         }
     }
     // Rooms.
+    let regions = Regions::build(&sc, &st.pages, &rooms);
     for dv in &mut devices {
         let p = Vec2::new(dv.at[0], dv.at[1]);
         if let Some(dec) = job.decisions.get(&dv.id).filter(|x| !x.room_num.is_empty() || !x.room.is_empty()) {
             dv.room_num = dec.room_num.clone();
             dv.room = dec.room.clone();
+            dv.room_bbox = rooms.iter().find(|r| r.page == dv.page && !dec.room_num.is_empty() && r.num == dec.room_num).map(|r| r.bbox);
             continue;
         }
         let here: Vec<&Room> = rooms.iter().filter(|r| r.page == dv.page).collect();
         if let Some(r) = here.iter().find(|r| r.outline.as_ref().is_some_and(|o| in_poly(p, o))) {
             dv.room_num = r.num.clone();
             dv.room = r.name.clone();
+            dv.room_bbox = Some(r.bbox);
             continue;
+        }
+        // The room whose walls hold the device. Two or more room numbers in one space (an open
+        // area): the nearest of them, flagged.
+        if let Some(ids) = regions.rooms_at(dv.page, p) {
+            let mut inside: Vec<(f64, &Room)> = ids.iter().filter_map(|i| rooms.get(*i)).map(|r| ((r.at - p).len(), r)).collect();
+            inside.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, r)) = inside.first() {
+                dv.room_num = r.num.clone();
+                dv.room = r.name.clone();
+                dv.room_bbox = Some(r.bbox);
+                if inside.len() > 1 {
+                    let all: Vec<&str> = inside.iter().take(3).map(|(_, r)| r.num.as_str()).collect();
+                    dv.flags.push(format!("room close call: open area with {} (NEEDS_REVIEW)", all.join(", ")));
+                }
+                continue;
+            }
         }
         let mut by: Vec<(f64, &Room)> = here.iter().map(|r| ((r.at - p).len(), *r)).collect();
         by.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1279,10 +1513,12 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
             [(_, r)] => {
                 dv.room_num = r.num.clone();
                 dv.room = r.name.clone();
+                dv.room_bbox = Some(r.bbox);
             }
             [(d1, r), (d2, r2), ..] => {
                 dv.room_num = r.num.clone();
                 dv.room = r.name.clone();
+                dv.room_bbox = Some(r.bbox);
                 if *d2 <= d1 * 1.15 {
                     dv.flags.push(format!("room close call: {} or {} (NEEDS_REVIEW)", r.num, r2.num));
                 }
@@ -1294,6 +1530,24 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
     // What each device does and what it serves, from the text around it.
     let address_pieces: HashSet<usize> = addr_texts.iter().flat_map(|a| a.pieces.iter().copied()).chain(partial.iter().map(|p| p.piece)).collect();
     let ctx = Context::new(&sc.texts, &st.pages, &rooms, &address_pieces);
+    // Address-like text that wasn't read: shown by "Show missed", never counted.
+    let address_like = |v: &str| {
+        let u: String = v.to_ascii_uppercase().chars().filter(|c| !c.is_whitespace()).collect();
+        let b = u.as_bytes();
+        (1..b.len()).any(|i| {
+            let (prev, cur) = (b[i - 1], b[i]);
+            (cur == b'L' && prev.is_ascii_digit() && b.first() == Some(&b'N'))
+                || ((cur == b'D' || cur == b'M') && prev.is_ascii_digit() && u.contains('L'))
+        })
+    };
+    st.missed = sc
+        .texts
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| !address_pieces.contains(i) && t.value.len() <= 20 && address_like(&t.value) && parse_addr(&t.value).is_none())
+        .map(|(_, t)| (page_of(&st.pages, t.at), text_box(t), t.value.trim().to_string()))
+        .take(5000)
+        .collect();
     for dv in &mut devices {
         if let Some((sheet, dwg)) = titles.get(dv.page.saturating_sub(1)) {
             dv.sheet = sheet.clone();
@@ -1305,6 +1559,29 @@ fn extract(s: &Session, st: &mut FaState) -> Result<()> {
         dv.function = function;
         dv.equipment = equipment;
         dv.flags.extend(notes);
+        // A callout box listing the module numbers ("58 - STATUS" under "…-FCU-40").
+        if dv.kind == "M"
+            && let Some(n) = dv.number
+            && let Some((act, tag)) = callout(&sc.texts, &st.pages, dv.page, p, n, dv.size.max(near / 7.0))
+        {
+            if dv.equipment.is_empty() && !tag.is_empty() {
+                dv.equipment = tag;
+                dv.flags.retain(|f| !f.starts_with("equipment"));
+            }
+            if !dv.function.contains(&act) {
+                dv.function = if dv.function.is_empty() { act } else { format!("{} {act}", dv.function) };
+            }
+        }
+        if let Some(dec) = job.decisions.get(&dv.id) {
+            if !dec.function.is_empty() {
+                dv.function = dec.function.clone();
+                dv.flags.retain(|f| !f.starts_with("function"));
+            }
+            if !dec.equipment.is_empty() {
+                dv.equipment = dec.equipment.clone();
+                dv.flags.retain(|f| !f.starts_with("equipment"));
+            }
+        }
         if dv.dtype.is_empty() {
             dv.dtype = match dv.kind.as_str() {
                 "D" if dv.function == "HEAT DETECTOR" => "HEAT".into(),
@@ -1710,8 +1987,12 @@ fn run_report(s: &mut Session, p: &Value) -> Result<Value> {
 fn run_points(s: &mut Session, p: &Value) -> Result<Value> {
     let mut st = load_state(s);
     extract(s, &mut st)?;
+    if let Some(o) = p.get("onlyProblems").and_then(Value::as_bool) {
+        st.only_problems = o;
+    }
     if p.get("mark").and_then(Value::as_bool).unwrap_or(true) {
-        mark(s, &mut st, p.get("onlyProblems").and_then(Value::as_bool).unwrap_or(false))?;
+        let only = st.only_problems;
+        mark(s, &mut st, only)?;
     }
     let c = counts(&st);
     let np = not_placed(&st);
@@ -1742,6 +2023,10 @@ fn run_points(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The devices picked by `handles` (markers or the devices' own blocks), else the selection.
 fn picked(s: &Session, st: &FaState, p: &Value) -> Vec<usize> {
+    if let Some(ids) = p.get("ids").and_then(Value::as_array) {
+        let want: HashSet<&str> = ids.iter().filter_map(Value::as_str).collect();
+        return (0..st.devices.len()).filter(|i| want.contains(st.devices[*i].id.as_str())).collect();
+    }
     let hs: Vec<Handle> = match p.get("handles").and_then(Value::as_array) {
         Some(a) => a.iter().filter_map(|v| v.as_str().and_then(|h| u64::from_str_radix(h, 16).ok()).map(Handle)).collect(),
         None => s.selection(),
@@ -1818,6 +2103,45 @@ fn run_runsheet(s: &mut Session, p: &Value) -> Result<Value> {
     run_export(s, &q)
 }
 
+fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "fapointset";
+    let mut st = load_state(s);
+    let id = str_param(p, "id").ok_or_else(|| bad(CMD, "`id` (a device id from FAPOINTS) is required"))?.to_string();
+    let Some(dv) = st.devices.iter().find(|d| d.id == id).cloned() else {
+        return Err(bad(CMD, format!("no device {id}; run FAPOINTS first")));
+    };
+    let dec = st.job.decisions.entry(id.clone()).or_default();
+    let take = |k: &str| str_param(p, k).map(|v| v.trim().to_string());
+    if let Some(v) = take("function") {
+        dec.function = v;
+    }
+    if let Some(v) = take("equipment") {
+        dec.equipment = v;
+    }
+    if let Some(v) = take("roomNum") {
+        dec.room_num = v;
+    }
+    if let Some(v) = take("room") {
+        dec.room = v;
+    }
+    if let Some(a) = p.get("accepted").and_then(Value::as_bool) {
+        dec.accepted = a;
+    }
+    if let Some(v) = take("note") {
+        let k = if dv.key.is_empty() { dv.id.clone() } else { dv.key.clone() };
+        if v.is_empty() {
+            st.job.notes.remove(&k);
+        } else {
+            st.job.notes.insert(k, v);
+        }
+    }
+    save_job(&st)?;
+    s.fa = Some(st);
+    let _ = run_points(s, &json!({}))?;
+    let dv = s.fa.as_ref().and_then(|st| st.devices.iter().find(|d| d.id == id).cloned());
+    Ok(json!({ "device": dv, "message": format!("{} updated", dv.as_ref().map(|d| d.address.clone()).unwrap_or(id)) }))
+}
+
 fn run_note(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "fapointnote";
     let mut st = load_state(s);
@@ -1851,7 +2175,9 @@ fn run_accept_greens(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn run_review(s: &mut Session, _p: &Value) -> Result<Value> {
-    run_points(s, &json!({ "onlyProblems": true }))
+    // A toggle: show only what needs review, or everything again.
+    let now = s.fa.as_ref().is_some_and(|st| st.only_problems);
+    run_points(s, &json!({ "onlyProblems": !now }))
 }
 
 fn run_accept(s: &mut Session, p: &Value) -> Result<Value> {
